@@ -278,7 +278,7 @@ Decisions and gaps:
 - **Core function set only** (arithmetic, math, mask functions, variable-argument statistics). `erf`, random numbers, the `fico_*` conversions and the rest give "not implemented" naming the function.
 - **A rule layer still has a dataset** (its OLay/Thr pickers); a pure conjunction can use any. A "rule-only" layer without one would be a cleaner model.
 - **Missing data:** a voxel outside an overlay's field of view reads as 0 in rules (AFNI would resample outside as 0 too); AFNI's own `step(NaN)` is 1, which afniru avoids by never binding NaN.
-- The A (fade) button does not apply to masks; B (boxed) does, and an outlined mask is drawn after the filled layers.
+- The A (fade) button does not apply to masks. B (boxed) keeps the fill and adds a solid outline drawn after the filled layers (it used to replace the fill, which also made A disappear).
 - Clusterize (M6) will take a mask layer as input without further work.
 
 ## Milestone 6 — Hooked cards + Clusterize ✅
@@ -297,9 +297,10 @@ Decisions and gaps:
 - **Color-map layers are clustered on the overlay dataset's own grid**, as AFNI's Clusterize does, then the surviving voxels are mapped to the underlay grid (nearest neighbor) for "only clusters". **Mask layers are clustered on the underlay grid**, where their rule is evaluated; they have no peak, so the table shows the center of mass.
 - **Defaults** (afniru's, not AFNI's): NN1, at least 10 voxels, bisided, "only clusters" off.
 - **Min size in µL is a real volume.** `3dClusterize -clust_vol V` reads V as a *number of voxels*; afni-core and afniru do not (see afni-core's header).
-- **Clustering is synchronous** and waits for the mouse to be released, so dragging a threshold stays smooth but a big volume pauses for a moment on release. Moving it to a background thread is the first thing to do if that is felt.
-- The table shows the first 200 clusters; the table has no sort or export yet.
-- The Overlay card's chips list only Clusterize today; "Histogram" and "Atlas labels" in the mockup come with their tools. Dragging a tile onto a card to hook it (the dashed drop slot) is not done: tiles and chips hook.
+- **Clustering runs on a background thread** once the mouse is released (`engine.rs`); until it finishes the card keeps the old clusters marked "(updating)". Only a mask layer's rule is still evaluated on the interface thread (it needs the views' caches).
+- The table shows the first 200 clusters. Click a heading to sort (again to reverse); **Copy** puts the table on the clipboard and **Save…** writes it (tab separated, with a line saying what was clustered); both use the current coordinate convention.
+- **Dragging the Cluster tile** over the cards shows a dashed drop slot under each layer card that has no Clusterize; releasing on it hooks it there. The tile's click still hooks the top layer.
+- The Overlay card's chips list only Clusterize today; "Histogram" and "Atlas labels" in the mockup come with their tools.
 - A hooked card cannot be dragged away from its parent; it follows it.
 
 ## Milestone 7 — Graph view + sub-bricks ⬜
@@ -374,3 +375,4 @@ Decisions and gaps:
 - 2026-10-03 — M5 done: a stack of overlay layers with a layer list, one card per layer, bottom-to-top compositing with outlines last, per-layer readout swatches. New layers start at threshold 0, as in AFNI.
 - 2026-10-03 — M5B: mask layers with `3dcalc` rules. The expression engine was written in `afni-core` (`calc`, Phase 12) and checked against `1deval`; afniru's session, evaluation and card build on it. Reading `parser.f` showed AFNI's `absextreme` never runs in practice (see afni-core's DIFFERENCES C-5).
 - 2026-10-03 — M6 done: Clusterize hooked under Define Overlay (per layer), with the spine/socket UI, attach chips and group fold. Clusters match `3dClusterize` (new fixture `clust+orig` and AFNI's reports). Operators `<`, `&&`, `?:` etc. were added to `afni-core::calc` for mask rules, and the default overlay scale is now AFNI's own `Reds_and_Blues_Inv`.
+- 2026-10-03 — Background loading (`loader.rs`): datasets read on worker threads, applied in the order asked for, with name/size/elapsed shown; folders list their datasets (`AFNIRU_FOLDER_BROWSER`), loading only what is picked; replaced or removed datasets are freed. B keeps the fill. The AFNI logo is the window/dock icon.

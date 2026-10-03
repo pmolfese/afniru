@@ -154,6 +154,8 @@ mod tests {
             dataset: ds.as_deref(),
             coord_orient: CoordOrient::Rai,
             value: None,
+            loading: &[],
+            folders: &[],
             overlays: Vec::new(),
         };
         assert_eq!(

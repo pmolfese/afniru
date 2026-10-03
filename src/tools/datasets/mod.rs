@@ -5,6 +5,8 @@ use egui::{Button, Color32, ComboBox, DragValue, Label, Rect, RichText, Sense, U
 use egui_phosphor::regular as icon;
 
 use super::{Instance, Tool, ToolContext};
+use crate::data::Source;
+use crate::session::action::LoadRole;
 use crate::session::{Action, LayerId, OverlayChange};
 
 /// The Datasets tool. Pinned: it is always in the card stack.
@@ -18,11 +20,15 @@ impl Tool for DatasetsTool {
     fn card_ui(&self, ui: &mut Ui, cx: &ToolContext, _instance: &Instance) -> Vec<Action> {
         let mut actions = Vec::new();
         let theme = cx.theme;
+        actions.extend(loading_rows(ui, cx));
         let Some(ds) = cx.dataset else {
-            ui.label(
-                RichText::new("No dataset: File ▸ Open…, or drop one on the window.")
-                    .color(theme.text_dim),
-            );
+            if cx.loading.is_empty() && cx.folders.is_empty() {
+                ui.label(
+                    RichText::new("No dataset: File ▸ Open…, or drop one on the window.")
+                        .color(theme.text_dim),
+                );
+            }
+            actions.extend(folder_section(ui, cx));
             return actions;
         };
 
@@ -65,6 +71,7 @@ impl Tool for DatasetsTool {
         ui.label(RichText::new(ds.summary()).color(theme.text_dim).small());
         ui.separator();
         actions.extend(layer_list(ui, cx));
+        actions.extend(folder_section(ui, cx));
         actions
     }
 
@@ -77,6 +84,158 @@ impl Tool for DatasetsTool {
             n => format!("{base} + {n} overlays"),
         }
     }
+}
+
+/// One row for each dataset being read: its name and size, an animated bar,
+/// the time so far, and a button to stop waiting.
+fn loading_rows(ui: &mut Ui, cx: &ToolContext) -> Vec<Action> {
+    let mut actions = Vec::new();
+    for l in cx.loading {
+        ui.horizontal(|ui| {
+            let what = match l.role {
+                LoadRole::Underlay => "ULay",
+                LoadRole::Overlay => "Overlay",
+            };
+            let text = if l.waiting {
+                format!("{what} {} · read, waiting for the one before", l.name)
+            } else {
+                format!("{what} {}", crate::ui::shell::loading_text(l))
+            };
+            ui.label(RichText::new(text).small().color(cx.theme.accent));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(Button::new(RichText::new(icon::X)).frame(false))
+                    .on_hover_text("Stop waiting for this dataset")
+                    .clicked()
+                {
+                    actions.push(Action::CancelLoad(l.id));
+                }
+            });
+        });
+        ui.add(
+            egui::ProgressBar::new(0.0)
+                .desired_height(4.0)
+                .animate(true),
+        );
+        ui.add_space(2.0);
+    }
+    actions
+}
+
+/// The datasets found in each folder, each with buttons to open it as the
+/// underlay or as a new overlay layer.
+fn folder_section(ui: &mut Ui, cx: &ToolContext) -> Vec<Action> {
+    let mut actions = Vec::new();
+    let theme = cx.theme;
+    for folder in cx.folders {
+        ui.separator();
+        ui.horizontal(|ui| {
+            let name = folder.dir.file_name().map_or_else(
+                || folder.dir.display().to_string(),
+                |n| n.to_string_lossy().into(),
+            );
+            ui.label(
+                RichText::new(format!("{} {name}", icon::FOLDER_OPEN))
+                    .strong()
+                    .color(theme.text),
+            )
+            .on_hover_text(folder.dir.display().to_string());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(Button::new(RichText::new(icon::X)).frame(false))
+                    .on_hover_text("Stop listing this folder")
+                    .clicked()
+                {
+                    actions.push(Action::CloseFolder(folder.dir.clone()));
+                }
+                if ui
+                    .add(Button::new(RichText::new(icon::ARROWS_CLOCKWISE)).frame(false))
+                    .on_hover_text("Read the folder again")
+                    .clicked()
+                {
+                    actions.push(Action::ScanFolder(folder.dir.clone()));
+                }
+            });
+        });
+        let Some(entries) = &folder.entries else {
+            ui.label(
+                RichText::new("reading the folder…")
+                    .small()
+                    .color(theme.text_dim),
+            );
+            continue;
+        };
+        if let Some(e) = &folder.error {
+            ui.label(RichText::new(e).small().color(theme.error));
+            continue;
+        }
+        if entries.is_empty() {
+            ui.label(
+                RichText::new("no AFNI or NIfTI datasets here")
+                    .small()
+                    .color(theme.text_faint),
+            );
+            continue;
+        }
+        // A filter box for long lists.
+        let filter_id = ui.id().with(("folder_filter", &folder.dir));
+        let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
+        if entries.len() > 8 {
+            ui.add(
+                egui::TextEdit::singleline(&mut filter)
+                    .hint_text("filter")
+                    .desired_width(f32::INFINITY),
+            );
+            ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
+        }
+        let needle = filter.to_lowercase();
+        egui::ScrollArea::vertical()
+            .id_salt(("folder_scroll", &folder.dir))
+            .max_height(170.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for entry in entries
+                    .iter()
+                    .filter(|e| needle.is_empty() || e.label.to_lowercase().contains(&needle))
+                {
+                    let loaded = cx.session.store.iter().any(|(_, d)| {
+                        matches!(&d.source, Source::File(p)
+                            if p.to_string_lossy().starts_with(&*entry.path.to_string_lossy()))
+                    });
+                    ui.horizontal(|ui| {
+                        let ink = if loaded { theme.text_faint } else { theme.text };
+                        ui.add(
+                            Label::new(RichText::new(&entry.label).monospace().small().color(ink))
+                                .truncate(),
+                        )
+                        .on_hover_text(entry.path.display().to_string());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .small_button("+ Ovl")
+                                .on_hover_text("Add as a new overlay layer")
+                                .clicked()
+                            {
+                                actions.push(Action::LoadDataset(
+                                    entry.path.clone(),
+                                    LoadRole::Overlay,
+                                ));
+                            }
+                            if ui
+                                .small_button("ULay")
+                                .on_hover_text("Show as the underlay")
+                                .clicked()
+                            {
+                                actions.push(Action::LoadDataset(
+                                    entry.path.clone(),
+                                    LoadRole::Underlay,
+                                ));
+                            }
+                        });
+                    });
+                }
+            });
+    }
+    actions
 }
 
 /// The overlay layers, top (drawn last) first: eye, swatch, name, opacity, a

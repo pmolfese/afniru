@@ -1,0 +1,162 @@
+
+type = string-attribute
+name = HISTORY_NOTE
+count = 795
+'[molfesepj@MH01557374MLI: Sat Oct  3 12:11:38 2026] {AFNI_26.2.08:macos_13_ARM} 3dTcat -prefix bold b_0+orig.HEAD b_1+orig.HEAD b_2+orig.HEAD b_3+orig.HEAD b_4+orig.HEAD b_5+orig.HEAD b_6+orig.HEAD b_7+orig.HEAD b_8+orig.HEAD b_9+orig.HEAD b_10+orig.HEAD b_11+orig.HEAD b_12+orig.HEAD b_13+orig.HEAD b_14+orig.HEAD b_15+orig.HEAD b_16+orig.HEAD b_17+orig.HEAD b_18+orig.HEAD b_19+orig.HEAD b_20+orig.HEAD b_21+orig.HEAD b_22+orig.HEAD b_23+orig.HEAD b_24+orig.HEAD b_25+orig.HEAD b_26+orig.HEAD b_27+orig.HEAD b_28+orig.HEAD b_29+orig.HEAD b_30+orig.HEAD b_31+orig.HEAD b_32+orig.HEAD b_33+orig.HEAD b_34+orig.HEAD b_35+orig.HEAD b_36+orig.HEAD b_37+orig.HEAD b_38+orig.HEAD b_39+orig.HEAD\n[molfesepj@MH01557374MLI: Sat Oct  3 12:11:38 2026] {AFNI_26.2.08:macos_13_ARM} 3drefit -TR 2 bold+orig~
+
+type = string-attribute
+name = TYPESTRING
+count = 15
+'3DIM_HEAD_FUNC~
+
+type = string-attribute
+name = IDCODE_STRING
+count = 27
+'AFN_ER-Y0tZmdqlGKkDWYHTBbA~
+
+type = string-attribute
+name = IDCODE_DATE
+count = 25
+'Sat Oct  3 12:11:38 2026~
+
+type = integer-attribute
+name = SCENE_DATA
+count = 8
+ 0 11 1 -999 -999
+ -999 -999 -999
+
+type = string-attribute
+name = LABEL_1
+count = 5
+'zyxt~
+
+type = string-attribute
+name = LABEL_2
+count = 5
+'zyxt~
+
+type = string-attribute
+name = DATASET_NAME
+count = 5
+'zyxt~
+
+type = integer-attribute
+name = ORIENT_SPECIFIC
+count = 3
+ 0 3 4
+
+type  = float-attribute
+name  = ORIGIN
+count = 3
+             -2           -2.5             -3
+
+type  = float-attribute
+name  = DELTA
+count = 3
+              2              2              3
+
+type  = float-attribute
+name  = IJK_TO_DICOM
+count = 12
+              2              0              0             -2              0
+              2              0           -2.5              0              0
+              3             -3
+
+type  = float-attribute
+name  = IJK_TO_DICOM_REAL
+count = 12
+              2              0              0             -2              0
+              2              0           -2.5              0              0
+              3             -3
+
+type  = float-attribute
+name  = BRICK_STATS
+count = 80
+       83.44161       120.5824       80.04622       118.9835       81.23866
+       118.7908       80.70132       115.8131       82.06872       112.5906
+       81.57417       113.2492        83.2041       120.9228       82.56718
+       123.0245       86.33001       120.9125       90.71529       124.4799
+       90.38789       122.2231       94.60753        123.527       94.59918
+       126.5432       88.80625       125.7616       87.22414        127.742
+        89.6386        127.112       88.03931       124.3114       89.90772
+       122.8431       89.15922        120.248       91.47202       123.7148
+       90.02598       124.2872        93.1545       130.6064       90.99854
+       131.1792       96.27303       129.8514       101.3423       129.8412
+       101.3254       131.8152       98.54663       130.8367       98.67268
+       133.2391       93.97057         133.56       94.16198       134.2148
+       95.02586       132.0943       94.95934       128.5813       95.86314
+       126.5493       96.06056       131.3742       96.81965       134.3882
+       99.16362       134.2222       101.6508       138.7038       100.9728
+       137.6032       107.2536       138.2016       111.1592       139.6024
+
+type = integer-attribute
+name = TAXIS_NUMS
+count = 8
+ 40 0 77002 -999 -999
+ -999 -999 -999
+
+type  = float-attribute
+name  = TAXIS_FLOATS
+count = 8
+              0              2              0              0              0
+        -999999        -999999        -999999
+
+type = integer-attribute
+name = DATASET_RANK
+count = 8
+ 3 40 0 0 0
+ 0 0 0
+
+type = integer-attribute
+name = DATASET_DIMENSIONS
+count = 5
+ 4 5 6 0 0
+
+type = integer-attribute
+name = BRICK_TYPES
+count = 40
+ 3 3 3 3 3
+ 3 3 3 3 3
+ 3 3 3 3 3
+ 3 3 3 3 3
+ 3 3 3 3 3
+ 3 3 3 3 3
+ 3 3 3 3 3
+ 3 3 3 3 3
+
+type  = float-attribute
+name  = BRICK_FLOAT_FACS
+count = 40
+              0              0              0              0              0
+              0              0              0              0              0
+              0              0              0              0              0
+              0              0              0              0              0
+              0              0              0              0              0
+              0              0              0              0              0
+              0              0              0              0              0
+              0              0              0              0              0
+
+type = string-attribute
+name = BRICK_LABS
+count = 120
+'#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~#0~
+
+type = string-attribute
+name = TEMPLATE_SPACE
+count = 5
+'ORIG~
+
+type = integer-attribute
+name = INT_CMAP
+count = 1
+ 0
+
+type = string-attribute
+name = BYTEORDER_STRING
+count = 10
+'LSB_FIRST~
+
+type = string-attribute
+name = BRICK_KEYWORDS
+count = 40
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

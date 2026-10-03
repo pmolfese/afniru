@@ -56,6 +56,10 @@ pub struct Prefs {
     pub colorscale: AfniColorScale,
     /// `AFNI_SESSTRAIL = n`: directory levels kept in dataset names.
     pub sess_trail: usize,
+    /// `AFNIRU_FOLDER_BROWSER = YES | NO`: list the datasets of a folder
+    /// (given on the command line, dropped, or opened) in the Datasets card.
+    /// Only the names are read; a dataset is loaded when picked.
+    pub folder_browser: bool,
 }
 
 impl Default for Prefs {
@@ -67,6 +71,7 @@ impl Default for Prefs {
             coord_orient: CoordOrient::default(),
             colorscale: AfniColorScale::afni_default(),
             sess_trail: 0,
+            folder_browser: true,
         }
     }
 }
@@ -114,6 +119,13 @@ pub const DEFAULT_FILE: &str = "\
                                       // Spectrum:yellow_to_red, Color_circle_AJJ,
                                       // Color_circle_ZSS, Reds_and_Blues,
                                       // Reds_and_Blues_w_Green
+
+   AFNIRU_FOLDER_BROWSER    = YES     // YES = a folder given on the command line
+                                      //       (or dropped / opened) lists its
+                                      //       datasets in the Datasets card to
+                                      //       pick from; only names are read, a
+                                      //       dataset loads when you pick it
+                                      // NO  = never list folders
 
    AFNI_SESSTRAIL           = 0       // directory levels shown before a
                                       // dataset's name (0 = name only)
@@ -200,6 +212,11 @@ impl Prefs {
                 "no" | "false" | "0" => self.left_is_left = false,
                 _ => {}
             },
+            "AFNIRU_FOLDER_BROWSER" => match value.as_str() {
+                "yes" | "true" | "1" => self.folder_browser = true,
+                "no" | "false" | "0" => self.folder_browser = false,
+                _ => {}
+            },
             "AFNI_ORIENT" => match value.as_str() {
                 "rai" => self.coord_orient = CoordOrient::Rai,
                 "lpi" => self.coord_orient = CoordOrient::Lpi,
@@ -242,6 +259,8 @@ mod tests {
         assert!(!p.left_is_left);
         assert_eq!(p.sess_trail, 0);
         assert_eq!(p.coord_orient, CoordOrient::Rai);
+        assert!(p.folder_browser);
+        assert!(!Prefs::parse("AFNIRU_FOLDER_BROWSER = no").folder_browser);
         assert_eq!(p.colorscale, AfniColorScale::afni_default());
         assert_eq!(p.colorscale, AfniColorScale::RedsAndBluesInv);
     }

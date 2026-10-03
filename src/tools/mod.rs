@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
 use crate::geom::{CoordOrient, Plane};
+use crate::loader::{FolderListing, LoadingInfo};
 use crate::render::overlay::OverlayFrames;
 use crate::session::{Action, ControllerState, LayerId, OverlayLayer, Session};
 use crate::ui::theme::Theme;
@@ -139,6 +140,7 @@ pub fn tool(id: ToolId) -> Option<&'static dyn Tool> {
         ToolId::Overlay => Some(&overlay::OverlayTool),
         ToolId::Clusterize => Some(&clusterize::ClusterizeTool),
         ToolId::Crosshair => Some(&crosshair::CrosshairTool),
+        ToolId::Graph => Some(&graph::GraphTool),
         _ => None,
     }
 }
@@ -157,6 +159,10 @@ pub struct ToolContext<'a> {
     pub coord_orient: CoordOrient,
     /// The underlay's value at the crosshair.
     pub value: Option<f32>,
+    /// The datasets being read in the background.
+    pub loading: &'a [LoadingInfo],
+    /// The folders whose datasets can be picked.
+    pub folders: &'a [FolderListing],
     /// The overlay layers, bottom first.
     pub overlays: Vec<OverlayContext<'a>>,
 }

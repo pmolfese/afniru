@@ -1,4 +1,4 @@
-//! The view area: three linked plane cards (and the Graph placeholder),
+//! The view area: three linked plane cards and the Graph view,
 //! arranged 1×3, 3×1 or 2×2, sharing one crosshair and one window.
 
 use std::collections::HashMap;
@@ -21,9 +21,10 @@ use crate::render::resample::{self, Grid};
 use crate::render::slice::PlaneMap;
 use afni_core::color::Rgba;
 
+use super::graph_view::{GraphEvents, GraphInput, graph_view};
 use crate::session::overlay::Binding;
 use crate::session::store::{DatasetId, DatasetStore};
-use crate::session::{Cursor, LayerId, OverlayLayer};
+use crate::session::{Action as SessionAction, Cursor, LayerId, OverlayLayer, SeriesSettings};
 
 /// Gap between cards.
 const GAP: f32 = 8.0;
@@ -43,6 +44,8 @@ pub struct Target<'a> {
     pub overlays: Vec<OverlayTarget<'a>>,
     /// Every dataset, for the sub-bricks that mask rules read.
     pub store: &'a DatasetStore,
+    /// What the Graph view plots.
+    pub series: &'a SeriesSettings,
 }
 
 /// What a layer shows at one voxel.
@@ -102,6 +105,9 @@ pub struct ViewArea {
     sub_cache: SubFrames,
     /// Axial, coronal, sagittal (the order of [`Plane::ALL`]).
     cards: [PlaneCard; 3],
+    /// Changes the Graph view asked for (a new time point), for the app to
+    /// apply after the frame.
+    actions: Vec<SessionAction>,
 }
 
 impl ViewArea {
@@ -115,6 +121,7 @@ impl ViewArea {
             overlay_cache: HashMap::new(),
             sub_cache: HashMap::new(),
             cards: Plane::ALL.map(PlaneCard::new),
+            actions: Vec::new(),
         }
     }
 
@@ -389,8 +396,40 @@ impl ViewArea {
             card_frame(ui, theme, *cell, active, |ui| card.ui(ui, &cx, cur));
         }
         if let Some(cell) = cells.get(3) {
-            card_frame(ui, theme, *cell, false, |ui| graph_placeholder(ui, theme));
+            let events = card_frame(ui, theme, *cell, false, |ui| self.graph(ui, theme, t, cur));
+            if let Some(tr) = events.set_tr {
+                self.actions.push(SessionAction::SetUnderlaySubBrick(tr));
+            }
+            if let Some(ijk) = events.move_to {
+                cur.ijk = ijk;
+            }
         }
+    }
+
+    /// The Graph view for the crosshair, or why there is none.
+    fn graph(&self, ui: &mut Ui, theme: &Theme, t: &Target, cur: &Cursor) -> GraphEvents {
+        let source = t.series.source.and_then(|id| t.store.get(id));
+        let fit = t.series.fit.and_then(|id| t.store.get(id));
+        graph_view(
+            ui,
+            &GraphInput {
+                theme,
+                under: t.ds,
+                source: source.map_or(t.ds, |d| d.as_ref()),
+                source_is_under: source.is_none(),
+                fit: fit.map(|d| d.as_ref()),
+                settings: t.series,
+                cursor: cur.ijk,
+                plane: cur.active,
+                left_is_left: self.options.left_is_left,
+                current_tr: t.sub_brick,
+            },
+        )
+    }
+
+    /// The changes the Graph view asked for since the last call.
+    pub fn take_actions(&mut self) -> Vec<SessionAction> {
+        std::mem::take(&mut self.actions)
     }
 
     /// The strip under the views: where the crosshair is, and the window.
@@ -571,7 +610,13 @@ pub fn cell_rects(area: Rect, layout: Layout) -> Vec<Rect> {
 }
 
 /// A card: a framed rectangle exactly `rect` in size, active one outlined.
-fn card_frame(ui: &mut Ui, theme: &Theme, rect: Rect, active: bool, add: impl FnOnce(&mut Ui)) {
+fn card_frame<R>(
+    ui: &mut Ui,
+    theme: &Theme,
+    rect: Rect,
+    active: bool,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> R {
     ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
         let stroke = Stroke::new(1.0, if active { theme.accent } else { theme.border });
         Frame::new()
@@ -583,22 +628,11 @@ fn card_frame(ui: &mut Ui, theme: &Theme, rect: Rect, active: bool, add: impl Fn
                 let inner = rect.size() - vec2(2.0 * PAD + 2.0, 2.0 * PAD + 2.0);
                 ui.set_min_size(inner);
                 ui.set_max_size(inner);
-                add(ui);
-            });
-    });
-}
-
-fn graph_placeholder(ui: &mut Ui, theme: &Theme) {
-    ui.horizontal(|ui| {
-        let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), egui::Sense::hover());
-        ui.painter().circle_filled(dot.center(), 4.0, theme.accent);
-        ui.label(RichText::new("Graph").color(theme.text).strong());
-    });
-    ui.centered_and_justified(|ui| {
-        ui.label(
-            RichText::new("time series at the crosshair (Milestone 7)").color(theme.text_faint),
-        );
-    });
+                add(ui)
+            })
+            .inner
+    })
+    .inner
 }
 
 #[cfg(test)]
@@ -800,6 +834,7 @@ mod render_tests {
         };
         let over = synthetic::tmap();
         let store = DatasetStore::default();
+        let series = SeriesSettings::default();
         let mut layer = OverlayLayer::new(crate::session::store::DatasetId(1), prefs.colorscale);
         layer.threshold = 3.1;
         let mut harness = egui_kittest::Harness::builder()
@@ -820,6 +855,7 @@ mod render_tests {
                     sub_brick: 0,
                     generation: 1,
                     store: &store,
+                    series: &series,
                 };
                 egui::Panel::top("toolbar").show(ui, |ui| {
                     shell::toolbar(ui, &theme, Some(&ds), &mut view.options);

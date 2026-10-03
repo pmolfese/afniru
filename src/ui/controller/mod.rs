@@ -20,6 +20,7 @@ use workspace::Workspaces;
 
 use crate::session::{Action, OverlayChange, graph};
 use crate::tools::{Instance, ToolContext, ToolId};
+use crate::ui::theme::Theme;
 
 /// Storage key for the persisted controller state.
 pub const STORAGE_KEY: &str = "afniru_controller";
@@ -48,6 +49,12 @@ pub struct ControllerUi {
     /// by the parent's tool and instance.
     #[serde(skip)]
     pub(crate) group_folded: std::collections::HashSet<(ToolId, u64)>,
+    /// A tile of a hookable tool being dragged toward a card.
+    #[serde(skip)]
+    pub(crate) tile_drag: Option<ToolId>,
+    /// The dragged tile was released this frame.
+    #[serde(skip)]
+    tile_released: bool,
 }
 
 impl ControllerUi {
@@ -112,7 +119,15 @@ impl ControllerUi {
         self.workspace_row(ui, cx);
         ui.add_space(4.0);
         let mut actions = Vec::new();
-        if let Some(tool) = shelf::shelf(ui, theme, self.workspaces.current()) {
+        let shelf_events = shelf::shelf(ui, theme, self.workspaces.current());
+        if let Some(tool) = shelf_events.drag_started {
+            self.tile_drag = Some(tool);
+        }
+        if shelf_events.drag_stopped.is_some() {
+            self.tile_released = true;
+        }
+        self.paint_dragged_tile(ui, theme);
+        if let Some(tool) = shelf_events.clicked {
             let ws = self.workspaces.current_mut();
             ws.toggle(tool);
             // A hooked tool turned on hooks itself under a layer if none is.
@@ -127,6 +142,32 @@ impl ControllerUi {
             .auto_shrink([false, false])
             .show(ui, |ui| actions.extend(self.card_stack(ui, cx)));
         actions
+    }
+
+    /// A small tag at the pointer showing the tile being dragged.
+    fn paint_dragged_tile(&self, ui: &Ui, theme: &Theme) {
+        let (Some(tool), Some(pos)) = (self.tile_drag, ui.ctx().pointer_latest_pos()) else {
+            return;
+        };
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(
+            egui::Order::Tooltip,
+            egui::Id::new("dragged_tile"),
+        ));
+        let rect = Rect::from_min_size(pos + vec2(10.0, 8.0), vec2(112.0, 26.0));
+        painter.rect(
+            rect,
+            6.0,
+            theme.card_hi,
+            Stroke::new(1.0, theme.accent),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            format!("{} {}", tool.icon(), tool.title()),
+            egui::FontId::proportional(12.0),
+            theme.accent,
+        );
     }
 
     /// Controller tabs (only A until Milestone 8), pop-out and collapse.
@@ -334,12 +375,39 @@ impl ControllerUi {
                         }
                     }
                 }
+                // A tile being dragged: offer a slot to hook it under this card.
+                if let Some(dragged) = self.tile_drag
+                    && instance.id != 0
+                    && graph::parent(dragged) == Some(tool)
+                    && let Some(dragged_tool) = dragged.tool()
+                    && !dragged_tool.is_hooked(cx, instance.id)
+                    && let Some(action) = dragged_tool.hook_action(instance.id, true)
+                {
+                    ui.add_space(2.0);
+                    let over = hooks::drop_slot(
+                        ui,
+                        cx.theme,
+                        &format!("{} {}", dragged.icon(), dragged.title()),
+                        &format!(
+                            "{} · {}",
+                            dragged_tool.link_label(),
+                            instance.title.as_deref().unwrap_or(tool.title())
+                        ),
+                    );
+                    if over && self.tile_released {
+                        actions.push(action);
+                    }
+                }
                 group = Some(group.map_or(group_rect, |g| g.union(group_rect)));
                 ui.add_space(8.0);
             }
             if let Some(g) = group {
                 rects.push((tool, g));
             }
+        }
+        if self.tile_released {
+            self.tile_drag = None;
+            self.tile_released = false;
         }
         if let Some(fold) = fold_groups {
             // Alt-click folds or unfolds every group too.

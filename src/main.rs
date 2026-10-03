@@ -5,6 +5,7 @@ mod analysis;
 mod app;
 mod data;
 mod geom;
+mod loader;
 mod prefs;
 mod processing;
 mod render;
@@ -22,9 +23,11 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
-    /// Datasets to open (AFNI `.HEAD` or NIfTI); the first is the underlay and
-    /// the second, if any, the overlay (`afniru anat+orig func+orig`).
-    /// A directory is opened as an `afni_proc.py` results directory.
+    /// Datasets to open (AFNI `.HEAD` or NIfTI): the first is the underlay and
+    /// the others become overlay layers, in order (`afniru anat+tlrc stats+tlrc`).
+    /// A directory lists its datasets (AFNI and NIfTI) in the Datasets card to
+    /// pick from, and is also opened as an `afni_proc.py` results directory if
+    /// it is one.
     datasets: Vec<PathBuf>,
 
     /// Open the built-in demo phantom with a fake t-map overlay (no data needed).
@@ -35,10 +38,15 @@ struct Cli {
 fn main() -> eframe::Result {
     let cli = Cli::parse();
     let prefs = prefs::Prefs::load_or_create();
+    // The AFNI logo, as the window and dock icon (a bad file only loses the icon).
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1280.0, 800.0])
+        .with_drag_and_drop(true);
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../assets/afni_icon.png")) {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 800.0])
-            .with_drag_and_drop(true),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
@@ -49,9 +57,14 @@ fn main() -> eframe::Result {
             let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) =
                 cli.datasets.iter().cloned().partition(|p| p.is_dir());
             let mut app = app::App::new(prefs, &files, cli.demo);
+            for dir in &dirs {
+                app.add_folder(dir);
+            }
             // Look for an afni_proc.py run: directories given on the command
             // line, then the working directory and the folders of the files.
-            let mut implicit: Vec<PathBuf> = std::env::current_dir().into_iter().collect();
+            // Failing to find one is silent: a directory is also just a folder.
+            let mut implicit: Vec<PathBuf> = dirs.clone();
+            implicit.extend(std::env::current_dir());
             implicit.extend(files.iter().filter_map(|f| {
                 // A bare file name has the empty path as its parent.
                 f.parent().map(|p| {
@@ -62,7 +75,7 @@ fn main() -> eframe::Result {
                     }
                 })
             }));
-            app.detect_processing(&dirs, &implicit);
+            app.detect_processing(&[], &implicit);
             if let Some(storage) = cc.storage {
                 app.restore(storage);
             }

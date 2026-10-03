@@ -10,11 +10,13 @@
 pub mod compute;
 pub mod engine;
 
-use egui::{ComboBox, DragValue, Label, RichText, ScrollArea, Sense, Ui, vec2};
+use egui::{Button, ComboBox, DragValue, Label, RichText, ScrollArea, Sense, Ui, vec2};
 
 use super::{Instance, Tool, ToolContext, ToolId};
 use crate::geom::coords::ijk_to_ras;
-use crate::session::{Action, ClusterSettings, LayerId, OverlayChange, SizeUnit};
+use compute::SortBy;
+
+use crate::session::{Action, ClusterSettings, LayerId, OverlayChange, OverlayLayer, SizeUnit};
 use crate::ui::widgets::readout::format_value;
 
 /// The Clusterize tool.
@@ -163,15 +165,40 @@ impl Tool for ClusterizeTool {
                 }
                 Ok(out) => {
                     let stale = if entry.stale { "  (updating)" } else { "" };
-                    ui.label(
-                        RichText::new(format!(
-                            "{} · {} voxels{stale}",
-                            plural(out.rows.len(), "cluster"),
-                            out.total_voxels
-                        ))
-                        .color(theme.text_dim)
-                        .small(),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · {} voxels{stale}",
+                                plural(out.rows.len(), "cluster"),
+                                out.total_voxels
+                            ))
+                            .color(theme.text_dim)
+                            .small(),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let any = !out.rows.is_empty();
+                            if ui
+                                .add_enabled(any, Button::new(RichText::new("Save…").small()))
+                                .on_hover_text("Write the table to a text file")
+                                .clicked()
+                            {
+                                actions.push(Action::SaveClusters(layer.id));
+                            }
+                            if ui
+                                .add_enabled(any, Button::new(RichText::new("Copy").small()))
+                                .on_hover_text("Copy the table (tab separated) to the clipboard")
+                                .clicked()
+                            {
+                                let name = o.dataset.name.as_str();
+                                let text = compute::report_text(
+                                    out,
+                                    cx.coord_orient,
+                                    &heading(layer, name, &settings),
+                                );
+                                ui.ctx().copy_text(text);
+                            }
+                        });
+                    });
                     if !out.rows.is_empty() {
                         let here = cx.dataset.and_then(|d| {
                             out.rank_at(ijk_to_ras(&d.ijk_to_ras, cx.controller.cursor.ijk))
@@ -210,6 +237,30 @@ impl Tool for ClusterizeTool {
     }
 }
 
+/// The first line of a saved or copied table: what was clustered, and how.
+pub fn heading(layer: &OverlayLayer, dataset: &str, s: &ClusterSettings) -> String {
+    let what = if layer.as_mask {
+        format!("overlay {} ({dataset}) as a mask", layer.id.0)
+    } else {
+        format!(
+            "overlay {} ({dataset}) {}thr >= {}",
+            layer.id.0,
+            if layer.signed { "|" } else { "" },
+            layer.threshold
+        )
+    };
+    format!(
+        "afniru clusters of {what}; NN{}, at least {} {}, {}",
+        s.nn,
+        s.min_size,
+        match s.unit {
+            SizeUnit::Voxels => "voxels",
+            SizeUnit::Microliters => "uL",
+        },
+        if s.bisided { "bisided" } else { "not bisided" }
+    )
+}
+
 fn plural(n: usize, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
@@ -235,8 +286,46 @@ fn table(
 ) -> Vec<Action> {
     let theme = cx.theme;
     let mut actions = Vec::new();
-    let head = |ui: &mut Ui, text: &str| {
-        ui.label(RichText::new(text).small().color(theme.text_faint));
+    // Sorting: click a heading to order by it, again to reverse.
+    let sort_id = ui.id().with("cluster_sort");
+    let (by, descending): (SortBy, bool) = ui.data(|d| d.get_temp(sort_id)).unwrap_or_default();
+    let mut next_sort = (by, descending);
+    let mut head = |ui: &mut Ui, text: &str, column: Option<SortBy>| {
+        let arrow = match column {
+            Some(c) if c == by => {
+                if descending {
+                    " ▲"
+                } else {
+                    " ▼"
+                }
+            }
+            _ => "",
+        };
+        let label = Label::new(RichText::new(format!("{text}{arrow}")).small().color(
+            if column == Some(by) {
+                theme.accent
+            } else {
+                theme.text_faint
+            },
+        ));
+        match column {
+            Some(c) => {
+                if ui
+                    .add(label.sense(Sense::click()))
+                    .on_hover_text("Sort by this column")
+                    .clicked()
+                {
+                    next_sort = if c == by {
+                        (by, !descending)
+                    } else {
+                        (c, false)
+                    };
+                }
+            }
+            None => {
+                ui.add(label);
+            }
+        }
     };
     ScrollArea::vertical()
         .max_height(180.0)
@@ -247,12 +336,20 @@ fn table(
                 .spacing(vec2(10.0, 2.0))
                 .min_col_width(24.0)
                 .show(ui, |ui| {
-                    head(ui, "#");
-                    head(ui, "vox");
-                    head(ui, if is_mask { "" } else { "peak" });
-                    head(ui, if is_mask { "center" } else { "x y z" });
+                    head(ui, "#", Some(SortBy::Rank));
+                    head(ui, "vox", Some(SortBy::Voxels));
+                    if is_mask {
+                        head(ui, "", None);
+                        head(ui, "center", None);
+                    } else {
+                        head(ui, "peak", Some(SortBy::Peak));
+                        head(ui, "x y z", None);
+                    }
                     ui.end_row();
-                    for row in out.rows.iter().take(MAX_ROWS) {
+                    for row in compute::sorted(&out.rows, by, descending)
+                        .into_iter()
+                        .take(MAX_ROWS)
+                    {
                         let at = if is_mask {
                             row.center_ras
                         } else {
@@ -302,5 +399,8 @@ fn table(
                 );
             }
         });
+    if next_sort != (by, descending) {
+        ui.data_mut(|d| d.insert_temp(sort_id, next_sort));
+    }
     actions
 }

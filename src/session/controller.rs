@@ -3,6 +3,7 @@
 //! (`derive(Clone)`) is how Clone-to-compare will work (Milestone 8).
 
 use super::overlay::OverlayLayer;
+use super::series::SeriesSettings;
 use super::store::DatasetId;
 use crate::geom::Plane;
 
@@ -37,4 +38,6 @@ pub struct ControllerState {
     /// The overlay layers, bottom first: later layers are drawn over earlier
     /// ones.
     pub overlays: Vec<OverlayLayer>,
+    /// What the Graph view plots.
+    pub series: SeriesSettings,
 }

@@ -101,6 +101,63 @@ impl Dataset {
         }
     }
 
+    /// A synthetic dataset on a coarser grid covering the same world as the
+    /// phantom: `step` phantom voxels per voxel (1 mm each), with `tr` seconds
+    /// between sub-bricks when it is a time series.
+    pub(crate) fn synthetic_coarse(
+        name: &str,
+        step: usize,
+        frames: Vec<Vec<f32>>,
+        labels: Vec<String>,
+        tr: Option<f64>,
+    ) -> Self {
+        let dims = [
+            synthetic::NX / step,
+            synthetic::NY / step,
+            synthetic::NZ / step,
+        ];
+        let s = step as f64;
+        let half = (s - 1.0) / 2.0;
+        // Voxel centers sit at the middle of the `step` phantom voxels they cover.
+        let ijk_to_ras = [
+            [-s, 0.0, 0.0, synthetic::NX as f64 / 2.0 - half],
+            [0.0, -s, 0.0, synthetic::NY as f64 / 2.0 - half],
+            [0.0, 0.0, s, -(synthetic::NZ as f64) / 2.0 + half],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        Self {
+            name: name.to_string(),
+            source: Source::Synthetic,
+            dims,
+            voxel_mm: [s; 3],
+            nvols: frames.len(),
+            tr,
+            stats: vec![None; labels.len()],
+            fdr_curves: vec![None; labels.len()],
+            labels,
+            orient: GridOrient::from_ijk_to_ras(&ijk_to_ras),
+            ijk_to_ras,
+            ijk_to_ras_real: None,
+            data: Data::Synthetic(frames),
+        }
+    }
+
+    /// The time series at voxel `ijk`: one value per sub-brick, scaled.
+    /// `None` when the voxel is outside the grid or the data cannot be read.
+    pub fn series(&self, [i, j, k]: [usize; 3]) -> Option<Vec<f32>> {
+        let [nx, ny, nz] = self.dims;
+        if i >= nx || j >= ny || k >= nz {
+            return None;
+        }
+        match &self.data {
+            Data::Loaded(v) => (0..self.nvols).map(|t| v.value(i, j, k, t)).collect(),
+            Data::Synthetic(frames) => {
+                let at = i + nx * (j + ny * k);
+                frames.iter().map(|f| f.get(at).copied()).collect()
+            }
+        }
+    }
+
     /// Sub-brick `t` as `f32`, in `i + nx * (j + ny * k)` order.
     pub fn frame(&self, t: usize) -> Option<Vec<f32>> {
         match &self.data {

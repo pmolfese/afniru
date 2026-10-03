@@ -61,6 +61,55 @@ pub fn spine(ui: &Ui, theme: &Theme, socket: Pos2, child: Rect) {
         .circle_filled(pos2(socket.x, y), 2.5, theme.accent);
 }
 
+/// The dashed slot shown under a card while a tile is dragged over it. Returns
+/// whether the pointer is over it (then it is filled).
+pub fn drop_slot(ui: &mut Ui, theme: &Theme, title: &str, detail: &str) -> bool {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 58.0), Sense::hover());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Other,
+            true,
+            format!("Drop to attach {title}"),
+        )
+    });
+    let hovered = ui
+        .ctx()
+        .pointer_latest_pos()
+        .is_some_and(|p| rect.contains(p));
+    let r = rect.shrink(1.0);
+    if hovered {
+        ui.painter().rect_filled(r, 6.0, theme.card_hi);
+    }
+    let corners = [
+        r.left_top(),
+        r.right_top(),
+        r.right_bottom(),
+        r.left_bottom(),
+        r.left_top(),
+    ];
+    ui.painter().extend(egui::Shape::dashed_line(
+        &corners,
+        Stroke::new(1.5, theme.accent),
+        5.0,
+        4.0,
+    ));
+    ui.painter().text(
+        pos2(rect.center().x, rect.center().y - 8.0),
+        Align2::CENTER_CENTER,
+        format!("Drop to attach {title}"),
+        FontId::proportional(13.0),
+        theme.accent,
+    );
+    ui.painter().text(
+        pos2(rect.center().x, rect.center().y + 10.0),
+        Align2::CENTER_CENTER,
+        detail,
+        FontId::proportional(11.0),
+        theme.text_dim,
+    );
+    hovered
+}
+
 /// The strip under a folded group's card: the hooked cards, stacked behind it.
 pub fn stacked_edge(ui: &Ui, theme: &Theme, card: Rect) {
     let edge = Rect::from_min_max(

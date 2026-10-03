@@ -145,7 +145,7 @@ impl Tool for OverlayTool {
                         let mut boxed = layer.boxed;
                         if ui
                             .toggle_value(&mut boxed, "B")
-                            .on_hover_text("Boxed: outline the suprathreshold regions")
+                            .on_hover_text("Boxed: add an outline around the suprathreshold regions (they stay filled)")
                             .changed()
                         {
                             actions.push(change(OverlayChange::Boxed(boxed)));

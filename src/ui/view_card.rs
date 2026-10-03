@@ -118,13 +118,18 @@ fn overlay_planes(
         if !o.layer.visible {
             continue;
         }
-        let mut colors = r.colors;
+        let colors = r.colors;
         if o.layer.boxed {
-            outline_only(&mut colors, &r.passed, map.width, map.height);
-            outlines.push(colors);
-        } else {
-            filled.push(colors);
+            // B draws the clusters filled (with A's fade, if on) and adds a
+            // solid outline around the suprathreshold regions on top.
+            let mut edge = colors.clone();
+            outline_only(&mut edge, &r.passed, map.width, map.height);
+            for c in edge.iter_mut().filter(|c| c.a > 0.0) {
+                *c = c.with_alpha(1.0);
+            }
+            outlines.push(edge);
         }
+        filled.push(colors);
     }
     filled.extend(outlines);
     filled
@@ -601,11 +606,14 @@ mod tests {
             ],
         };
         let planes = overlay_planes(&cx, Plane::Axial, 75, false);
-        // Fills bottom to top (a, then d; c is hidden), then b's outline.
-        assert_eq!(planes.len(), 3);
+        // Fills bottom to top (a, b, d; c is hidden), then b's solid outline.
+        assert_eq!(planes.len(), 4);
         assert!((planes[0][0].a - 0.2).abs() < 1e-6);
-        assert!((planes[1][0].a - 0.4).abs() < 1e-6);
-        assert!(planes[2].iter().any(|c| c.a > 0.0) && planes[2].iter().any(|c| c.a == 0.0));
+        assert!((planes[1][0].a - 1.0).abs() < 1e-6); // b stays filled
+        assert!((planes[2][0].a - 0.4).abs() < 1e-6);
+        let outline = &planes[3];
+        assert!(outline.iter().any(|c| c.a > 0.0) && outline.iter().any(|c| c.a == 0.0));
+        assert!(outline.iter().filter(|c| c.a > 0.0).all(|c| c.a == 1.0));
         // The cache key sees order, visibility and settings.
         let key = overlay_key(&cx.overlays);
         assert_ne!(key, 0);

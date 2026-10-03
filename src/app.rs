@@ -3,14 +3,16 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::data::{Dataset, load, synthetic};
+use crate::data::{Dataset, synthetic};
+use crate::loader::{FolderListing, Loader};
 use crate::prefs::Prefs;
 use crate::processing::StepId;
 use crate::processing::model::{ProcessingModel, ViewOption};
+use crate::session::action::LoadRole;
 use crate::session::overlay::OverlayChange;
-use crate::session::store::DatasetId;
+use crate::session::series::{SeriesChange, Stim};
 use crate::session::{Action as SessionAction, Session};
-use crate::tools::clusterize::engine::Engine;
+use crate::tools::clusterize::engine::{Engine, Wake};
 use crate::tools::{OverlayContext, ToolContext};
 use crate::ui::controller::{self, ControllerUi};
 use crate::ui::fonts;
@@ -32,6 +34,10 @@ pub struct App {
     controller: ControllerUi,
     /// The clusters of the layers Clusterize is hooked under.
     clusters: Engine,
+    /// Datasets being read (and folders being listed) in the background.
+    loader: Loader,
+    /// Folders given on the command line or opened, with their datasets.
+    folders: Vec<FolderListing>,
     /// The afni_proc.py run being inspected, if one was found or opened.
     processing: Option<ProcessingModel>,
     /// The Processing rail on the right.
@@ -65,6 +71,8 @@ impl App {
             error: None,
             controller: ControllerUi::default(),
             clusters: Engine::default(),
+            loader: Loader::default(),
+            folders: Vec::new(),
             processing: None,
             rail: ProcessingRail::default(),
             pending_view: None,
@@ -79,18 +87,33 @@ impl App {
             let id = app.session.controller().overlays[0].id;
             app.session
                 .apply(SessionAction::Layer(id, OverlayChange::Threshold(3.1)));
+            // A task time series and its fit for the Graph view.
+            let (bold, fit) = synthetic::bold();
+            let bold = app.session.store.add(bold);
+            let fit = app.session.store.add(fit);
+            for change in [
+                SeriesChange::Source(Some(bold)),
+                SeriesChange::Fit(Some(fit)),
+                SeriesChange::Stim(Some(Stim {
+                    name: "task blocks".into(),
+                    on: synthetic::bold_stimulus(),
+                })),
+            ] {
+                app.session.apply(SessionAction::Series(change));
+            }
         }
-        // Each opened dataset becomes the one shown, so open the first
-        // argument (the underlay) last. The later arguments become overlay
-        // layers, in order, each over the one before (`afniru anat func1 func2`).
-        let mut ids = Vec::new();
-        for p in paths.iter().rev() {
-            ids.push(app.open(p));
+        // The first dataset is the underlay; the later ones become layers, in
+        // order, each over the one before (`afniru anat func1 func2`). They load
+        // in the background and are applied in this order.
+        for (n, p) in paths.iter().enumerate() {
+            let role = if n == 0 {
+                LoadRole::Underlay
+            } else {
+                LoadRole::Overlay
+            };
+            app.request_load(p, role);
         }
-        ids.reverse();
-        for overlay in ids.iter().skip(1).flatten() {
-            app.session.apply(SessionAction::AddOverlay(*overlay));
-        }
+        app.poll_loads();
         app
     }
 
@@ -233,19 +256,72 @@ impl App {
         self.view.reset();
     }
 
-    /// Load `path`, keeping the error for the status bar on failure. Returns
-    /// the new dataset's id.
-    fn open(&mut self, path: &Path) -> Option<DatasetId> {
-        match load::load(path, self.prefs.sess_trail) {
-            Ok(d) => {
-                self.add(d);
-                self.session.controller().underlay
-            }
-            Err(e) => {
-                self.error = Some(format!("{e:#}"));
-                None
+    /// Open `path` as the underlay (in the background).
+    fn open(&mut self, path: &Path) {
+        self.request_load(path, LoadRole::Underlay);
+        self.poll_loads();
+    }
+
+    /// Start reading `path` on a worker thread; the dataset is applied by
+    /// [`App::poll_loads`] when it is ready.
+    fn request_load(&mut self, path: &Path, role: LoadRole) {
+        self.error = None;
+        self.loader.load(path, role, self.prefs.sess_trail);
+    }
+
+    /// Apply the loads that finished and take in the folder listings that
+    /// arrived. A failed load is reported in the status bar.
+    fn poll_loads(&mut self) {
+        let (ready, listings) = self.loader.poll();
+        for loaded in ready {
+            match loaded.result {
+                Ok(d) => {
+                    self.error = None;
+                    match loaded.role {
+                        LoadRole::Underlay => self.add(d),
+                        LoadRole::Overlay => {
+                            let id = self.session.store.add(d);
+                            self.session.apply(SessionAction::AddOverlay(id));
+                        }
+                    }
+                }
+                Err(e) => {
+                    let name = loaded.path.display();
+                    self.error = Some(format!("{name}: {e}"));
+                }
             }
         }
+        for (dir, result) in listings {
+            if let Some(f) = self.folders.iter_mut().find(|f| f.dir == dir) {
+                match result {
+                    Ok(entries) => {
+                        f.entries = Some(entries);
+                        f.error = None;
+                    }
+                    Err(e) => {
+                        f.entries = Some(Vec::new());
+                        f.error = Some(e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// List the datasets of `dir` in the Datasets card (reading it in the
+    /// background). A folder already listed is read again.
+    pub fn add_folder(&mut self, dir: &Path) {
+        if !self.prefs.folder_browser {
+            return; // AFNIRU_FOLDER_BROWSER = NO
+        }
+        if !self.folders.iter().any(|f| f.dir == dir) {
+            self.folders.push(FolderListing {
+                dir: dir.to_path_buf(),
+                entries: None,
+                error: None,
+            });
+        }
+        self.loader.scan(dir);
+        self.poll_loads();
     }
 
     /// Carry out the actions cards asked for; reset the view's caches if
@@ -253,11 +329,83 @@ impl App {
     fn apply(&mut self, actions: Vec<SessionAction>) {
         let before = self.session.generation;
         for a in actions {
+            match a {
+                SessionAction::SaveClusters(id) => {
+                    self.save_clusters(id);
+                    continue;
+                }
+                SessionAction::LoadStim => {
+                    self.load_stim();
+                    continue;
+                }
+                SessionAction::LoadDataset(path, role) => {
+                    self.request_load(&path, role);
+                    continue;
+                }
+                SessionAction::ScanFolder(dir) => {
+                    self.add_folder(&dir);
+                    continue;
+                }
+                SessionAction::CloseFolder(dir) => {
+                    self.folders.retain(|f| f.dir != dir);
+                    continue;
+                }
+                SessionAction::CancelLoad(id) => {
+                    self.loader.cancel(id);
+                    continue;
+                }
+                _ => {}
+            }
             self.session.apply(a);
         }
         if self.session.generation != before {
             self.view.reset();
         }
+    }
+
+    /// Ask for a `.1D` file and show its first column as the Graph's stimulus.
+    fn load_stim(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Stimulus (.1D)")
+            .add_filter("1D", &["1D", "txt"])
+            .pick_file()
+        else {
+            return;
+        };
+        match crate::tools::graph::series::load_stim(&path) {
+            Ok(stim) => self
+                .session
+                .apply(SessionAction::Series(SeriesChange::Stim(Some(stim)))),
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// Ask for a file name and write the cluster table of layer `id`.
+    fn save_clusters(&mut self, id: crate::session::LayerId) {
+        let Some(text) = self.cluster_report(id) else {
+            return;
+        };
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Save clusters")
+            .set_file_name("clusters.1D")
+            .save_file()
+            && let Err(e) = std::fs::write(&path, text)
+        {
+            self.error = Some(format!("writing {}: {e}", path.display()));
+        }
+    }
+
+    /// The cluster table of layer `id` as text, if it has clusters.
+    fn cluster_report(&self, id: crate::session::LayerId) -> Option<String> {
+        let layer = self.session.layer(id)?;
+        let settings = layer.cluster?;
+        let out = self.clusters.get(id)?.result.as_ref().ok()?;
+        let name = &self.session.store.get(layer.dataset)?.name;
+        Some(crate::tools::clusterize::compute::report_text(
+            out,
+            self.prefs.coord_orient,
+            &crate::tools::clusterize::heading(layer, name, &settings),
+        ))
     }
 
     fn handle(&mut self, ctx: &egui::Context, action: Action) {
@@ -279,6 +427,15 @@ impl App {
                     && let Err(e) = self.set_processing(&dir)
                 {
                     self.error = Some(e);
+                }
+            }
+            Action::OpenFolder => {
+                if let Some(dir) = rfd::FileDialog::new()
+                    .set_title("Open folder of datasets")
+                    .pick_folder()
+                {
+                    self.add_folder(&dir);
+                    let _ = self.set_processing(&dir);
                 }
             }
             Action::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
@@ -308,12 +465,17 @@ impl App {
         });
         for p in dropped {
             if p.is_dir() {
-                if let Err(e) = self.set_processing(&p) {
-                    self.error = Some(e);
-                }
+                // List its datasets; if it is an afni_proc.py run, open that too.
+                self.add_folder(&p);
+                let _ = self.set_processing(&p);
             } else {
                 self.open(&p);
             }
+        }
+        self.poll_loads();
+        if self.loader.busy() {
+            // Workers do not wake the window: check on them now and then.
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         self.poll_processing(&ctx);
 
@@ -332,6 +494,7 @@ impl App {
                 underlay.as_deref(),
                 self.error.as_deref(),
                 &self.view.conventions(underlay.as_deref()),
+                &self.loader.loading(),
             );
         });
 
@@ -340,19 +503,29 @@ impl App {
         if let Some(under) = &underlay {
             let settled = !ctx.input(|i| i.pointer.any_down());
             let view = &self.view;
-            let waiting = self
-                .clusters
-                .update(&self.session, under, settled, &|layers, id| {
-                    view.passed_everywhere(under, layers, id)
-                });
+            let wake: Wake = {
+                let ctx = ctx.clone();
+                std::sync::Arc::new(move || ctx.request_repaint())
+            };
+            let waiting = self.clusters.update(
+                &self.session,
+                under,
+                settled,
+                &|layers, id| view.passed_everywhere(under, layers, id),
+                &wake,
+            );
             if waiting {
                 ctx.request_repaint();
+            } else if self.clusters.busy() {
+                // The worker wakes the interface when done; this is a net.
+                ctx.request_repaint_after(std::time::Duration::from_millis(250));
             }
         }
 
         // The controller (left), then the views.
         let actions = {
             let controller = self.session.controller();
+            let loading = self.loader.loading();
             let layers = self.session.overlay_layers();
             let plain: Vec<_> = layers.iter().map(|(l, _)| l.clone()).collect();
             let probes = underlay
@@ -368,6 +541,8 @@ impl App {
                 value: underlay
                     .as_deref()
                     .and_then(|d| self.view.value_at(d, &controller.cursor)),
+                loading: &loading,
+                folders: &self.folders,
                 overlays: layers
                     .iter()
                     .enumerate()
@@ -400,6 +575,7 @@ impl App {
         let sub_brick = self.session.controller().underlay_sub_brick;
         let generation = self.session.generation;
         let layers = self.session.overlay_layers();
+        let series = self.session.controller().series.clone();
         let overlay_targets = || -> Vec<OverlayTarget> {
             layers
                 .iter()
@@ -419,12 +595,14 @@ impl App {
                 generation,
                 overlays: overlay_targets(),
                 store: &self.session.store,
+                series: &series,
             };
             let cursor = self.session.controller().cursor;
             egui::Panel::bottom("readout").show(ui, |ui| {
                 self.view.readout(ui, &theme, &target, &cursor);
             });
         }
+        let mut graph_actions = Vec::new();
         let background = egui::Frame::new().fill(theme.bg).inner_margin(8);
         egui::CentralPanel::default()
             .frame(background)
@@ -436,11 +614,13 @@ impl App {
                         generation,
                         overlays: overlay_targets(),
                         store: &self.session.store,
+                        series: &series,
                     };
                     // Disjoint fields: the store is read while the cursor moves.
                     let active = self.session.active;
                     let cursor = &mut self.session.controllers[active].cursor;
                     self.view.ui(ui, &theme, &target, cursor);
+                    graph_actions = self.view.take_actions();
                 }
                 None => {
                     ui.centered_and_justified(|ui| {
@@ -448,6 +628,7 @@ impl App {
                     });
                 }
             });
+        self.apply(graph_actions);
         self.view_dialog(&ctx, &theme);
         action
     }
@@ -1303,6 +1484,129 @@ mod tests {
         snapshot("masks_threshold_card", app, vec2(1300.0, 1500.0), None);
     }
 
+    // ---- Folders and background loading ----
+
+    fn fixtures_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    }
+
+    #[test]
+    fn a_folder_lists_its_datasets_without_loading_any() {
+        let mut app = App::new(
+            prefs(ThemeChoice::Dark, CanvasBackground::Black),
+            &[],
+            false,
+        );
+        app.add_folder(&fixtures_dir());
+        app.poll_loads();
+        let listing = &app.folders[0];
+        let labels: Vec<&str> = listing
+            .entries
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| e.label.as_str())
+            .collect();
+        assert!(labels.contains(&"tiny2+orig") && labels.contains(&"stat+orig"));
+        // Nothing is read into memory until one is picked.
+        assert!(app.session.store.is_empty());
+        assert!(app.session.underlay().is_none());
+    }
+
+    #[test]
+    fn the_folder_listing_can_be_turned_off_in_the_prefs() {
+        let mut p = prefs(ThemeChoice::Dark, CanvasBackground::Black);
+        p.folder_browser = false;
+        let mut app = App::new(p, &[], false);
+        app.add_folder(&fixtures_dir());
+        assert!(app.folders.is_empty());
+    }
+
+    #[test]
+    fn picking_datasets_from_a_folder_loads_the_underlay_and_an_overlay() {
+        let mut app = App::new(
+            prefs(ThemeChoice::Dark, CanvasBackground::Black),
+            &[],
+            false,
+        );
+        app.add_folder(&fixtures_dir());
+        app.apply(vec![SessionAction::LoadDataset(
+            fixtures_dir().join("tiny2+orig"),
+            LoadRole::Underlay,
+        )]);
+        app.apply(vec![SessionAction::LoadDataset(
+            fixtures_dir().join("stat+orig"),
+            LoadRole::Overlay,
+        )]);
+        app.poll_loads();
+        assert_eq!(app.session.underlay().unwrap().name, "tiny2+orig");
+        let layers = app.session.overlay_layers();
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].1.name, "stat+orig");
+        // Only the two chosen datasets are in memory.
+        assert_eq!(app.session.store.len(), 2);
+    }
+
+    #[test]
+    fn a_failed_load_is_reported_and_changes_nothing() {
+        let mut app = App::new(
+            prefs(ThemeChoice::Dark, CanvasBackground::Black),
+            &[],
+            false,
+        );
+        app.apply(vec![SessionAction::LoadDataset(
+            fixtures_dir().join("nope+orig"),
+            LoadRole::Overlay,
+        )]);
+        app.poll_loads();
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|e| e.contains("nope+orig"))
+        );
+        assert!(app.session.store.is_empty());
+    }
+
+    #[test]
+    fn the_folder_buttons_in_the_datasets_card_load_the_dataset() {
+        let mut app = App::new(
+            prefs(ThemeChoice::Dark, CanvasBackground::Black),
+            &[],
+            false,
+        );
+        app.add_folder(&fixtures_dir());
+        let mut harness = run_frames(app, vec2(1000.0, 900.0));
+        // One "ULay" button per listed dataset; take the first.
+        harness.get_all_by_label("ULay").next().unwrap().click();
+        harness.run();
+        harness.run();
+        assert!(harness.state().session.underlay().is_some());
+    }
+
+    #[test]
+    fn snapshot_a_folder_listing_in_the_datasets_card() {
+        let mut app = App::new(
+            prefs(ThemeChoice::Dark, CanvasBackground::Black),
+            &[],
+            false,
+        );
+        app.add_folder(&fixtures_dir());
+        snapshot("folder_listing", app, vec2(1000.0, 700.0), None);
+    }
+
+    #[test]
+    fn boxed_keeps_the_fill_and_adds_an_outline() {
+        let (mut app, id) = clusterize_app();
+        app.apply(vec![SessionAction::Layer(id, OverlayChange::Boxed(true))]);
+        app.apply(vec![SessionAction::Layer(id, OverlayChange::Fade(true))]);
+        snapshot(
+            "overlay_boxed_filled_with_fade",
+            app,
+            vec2(1000.0, 700.0),
+            None,
+        );
+    }
+
     // ---- Clusterize ----
 
     /// The clustered-statistic fixture as underlay and overlay, thresholded at
@@ -1443,6 +1747,103 @@ mod tests {
                 && (ras[2] - 9.0).abs() < 1.6,
             "{ras:?}"
         );
+    }
+
+    #[test]
+    fn dragging_the_cluster_tile_onto_a_layer_card_hooks_it_there() {
+        let (app, id) = clusterize_app();
+        let mut harness = run_frames(app, vec2(1300.0, 1100.0));
+        let tile = harness.get_by_label("Clusterize").rect().center();
+        harness.hover_at(tile);
+        harness.drag_at(tile);
+        harness.run();
+        harness.hover_at(tile + egui::vec2(3.0, 30.0));
+        harness.run();
+        // While dragging, the card offers a slot.
+        let slot = harness
+            .get_by_label_contains("Drop to attach")
+            .rect()
+            .center();
+        harness.hover_at(slot);
+        harness.run();
+        harness.drop_at(slot);
+        harness.run();
+        harness.run();
+        let state = harness.state();
+        assert!(state.session.layer(id).unwrap().cluster.is_some());
+        assert!(state.controller.tile_drag.is_none());
+    }
+
+    #[test]
+    fn snapshot_dragging_a_tile_shows_the_dashed_drop_slot() {
+        let (app, id) = clusterize_app();
+        let mut app = app;
+        // Fold the Overlay card so the slot is in view.
+        app.controller
+            .instance_collapsed
+            .insert((ToolId::Overlay, id.0), true);
+        let mut harness = run_frames(app, vec2(1300.0, 900.0));
+        let tile = harness.get_by_label("Clusterize").rect().center();
+        harness.hover_at(tile);
+        harness.drag_at(tile);
+        harness.run();
+        harness.hover_at(tile + egui::vec2(3.0, 30.0));
+        harness.run();
+        let slot = harness
+            .get_by_label_contains("Drop to attach")
+            .rect()
+            .center();
+        harness.hover_at(slot);
+        harness.run();
+        harness.snapshot("clusterize_drop_slot");
+    }
+
+    #[test]
+    fn a_tile_dropped_elsewhere_hooks_nothing() {
+        let (app, id) = clusterize_app();
+        let mut harness = run_frames(app, vec2(1300.0, 1100.0));
+        let tile = harness.get_by_label("Clusterize").rect().center();
+        harness.hover_at(tile);
+        harness.drag_at(tile);
+        harness.run();
+        let away = egui::pos2(900.0, 700.0); // over the views
+        harness.hover_at(away);
+        harness.run();
+        harness.drop_at(away);
+        harness.run();
+        assert!(harness.state().session.layer(id).unwrap().cluster.is_none());
+        assert!(harness.state().controller.tile_drag.is_none());
+    }
+
+    #[test]
+    fn clicking_a_table_heading_sorts_and_clicking_again_reverses() {
+        let (mut app, id) = clusterize_app();
+        hook(&mut app, id, false);
+        fold_for_table(&mut app, id);
+        let mut harness = run_frames(app, vec2(1300.0, 1100.0));
+        let y = |h: &egui_kittest::Harness<'_, App>, v: &str| {
+            h.get_all_by_value(v).next().unwrap().rect().min.y
+        };
+        assert!(y(&harness, "23") < y(&harness, "9")); // by rank: largest first
+        for name in ["vox", "vox ▼"] {
+            // The heading follows the combo box showing the same unit.
+            harness.get_all_by_value(name).last().unwrap().click();
+            harness.run();
+        }
+        assert!(y(&harness, "23") > y(&harness, "9")); // reversed: smallest first
+    }
+
+    #[test]
+    fn the_saved_table_says_what_was_clustered_and_lists_the_clusters() {
+        let (mut app, id) = clusterize_app();
+        hook(&mut app, id, false);
+        let harness = run_frames(app, vec2(1300.0, 1100.0));
+        let text = harness.state().cluster_report(id).unwrap();
+        assert!(text.starts_with("# afniru clusters of overlay 1 (clust+orig) |thr >= 1.5; NN2"));
+        assert_eq!(text.lines().filter(|l| !l.starts_with('#')).count(), 4);
+        // A layer without Clusterize has nothing to save.
+        let (plain, id) = clusterize_app();
+        assert!(plain.cluster_report(id).is_none());
     }
 
     #[test]

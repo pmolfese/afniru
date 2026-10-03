@@ -39,10 +39,23 @@ pub fn tile_state(ws: &Workspace, tool: ToolId) -> TileState {
     }
 }
 
-/// Draw the shelf; returns the tool whose tile was clicked.
-pub fn shelf(ui: &mut Ui, theme: &Theme, ws: &Workspace) -> Option<ToolId> {
+/// What the user did on the shelf this frame.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ShelfEvents {
+    /// A tile was clicked.
+    pub clicked: Option<ToolId>,
+    /// The user began dragging a tile of a hookable tool (one that attaches
+    /// under another, like Clusterize).
+    pub drag_started: Option<ToolId>,
+    /// The user released a dragged tile.
+    pub drag_stopped: Option<ToolId>,
+}
+
+/// Draw the shelf. A tile of a hookable tool can be dragged onto a card to
+/// hook it there.
+pub fn shelf(ui: &mut Ui, theme: &Theme, ws: &Workspace) -> ShelfEvents {
     let width = (ui.available_width() - GAP * (COLUMNS - 1) as f32) / COLUMNS as f32;
-    let mut clicked = None;
+    let mut events = ShelfEvents::default();
     let origin = ui.cursor().min;
     let rows = ToolId::SHELF.len().div_ceil(COLUMNS);
     let (_, _) = ui.allocate_exact_size(
@@ -62,8 +75,11 @@ pub fn shelf(ui: &mut Ui, theme: &Theme, ws: &Workspace) -> Option<ToolId> {
             vec2(width, HEIGHT),
         );
         let state = tile_state(ws, tool);
+        let hookable = tool.tool().is_some_and(|t| t.attaches_to().is_some());
         let sense = if state == TileState::Unbuilt {
             Sense::hover()
+        } else if hookable {
+            Sense::click_and_drag()
         } else {
             Sense::click()
         };
@@ -78,14 +94,25 @@ pub fn shelf(ui: &mut Ui, theme: &Theme, ws: &Workspace) -> Option<ToolId> {
                 tool.title(),
                 tool.planned_in()
             ))
+        } else if hookable {
+            response.on_hover_text(format!(
+                "{}: click to hook under the top overlay, or drag onto a card",
+                tool.title()
+            ))
         } else {
             response.on_hover_text(tool.title())
         };
         if response.clicked() {
-            clicked = Some(tool);
+            events.clicked = Some(tool);
+        }
+        if response.drag_started() {
+            events.drag_started = Some(tool);
+        }
+        if response.drag_stopped() {
+            events.drag_stopped = Some(tool);
         }
     }
-    clicked
+    events
 }
 
 fn draw_tile(ui: &Ui, theme: &Theme, rect: Rect, tool: ToolId, state: TileState, hovered: bool) {

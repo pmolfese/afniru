@@ -62,6 +62,66 @@ pub fn tmap() -> Dataset {
     d
 }
 
+/// Time points in the demo time series.
+pub const BOLD_TRS: usize = 80;
+/// Seconds between them.
+pub const BOLD_TR: f64 = 2.0;
+
+/// The demo's stimulus: on for 10 time points in every 20, from the 11th.
+pub fn bold_stimulus() -> Vec<bool> {
+    (0..BOLD_TRS).map(|t| t % 20 >= 10).collect()
+}
+
+/// A fake task response: the stimulus smoothed by a slow rise and fall.
+fn bold_response() -> Vec<f32> {
+    let stim = bold_stimulus();
+    let mut out = vec![0.0f32; BOLD_TRS];
+    let mut level = 0.0f32;
+    for (t, on) in stim.iter().enumerate() {
+        level += (f32::from(u8::from(*on)) - level) * 0.45;
+        out[t] = level;
+    }
+    out
+}
+
+/// The demo time series and its noise-free fit, 5 mm voxels covering the
+/// phantom's world: a response where the t-map is strong, a slow drift, and
+/// noise.
+pub fn bold() -> (Dataset, Dataset) {
+    let anat = build_anat();
+    let t = build_tstat(&anat);
+    let step = 5;
+    let (nx, ny, nz) = (NX / step, NY / step, NZ / step);
+    let response = bold_response();
+    let n = nx * ny * nz;
+    let mut data = vec![vec![0.0f32; n]; BOLD_TRS];
+    let mut fit = vec![vec![0.0f32; n]; BOLD_TRS];
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let at = i + nx * (j + ny * k);
+                // The phantom voxel at the middle of this one.
+                let fine = (step * i + 2) + NX * ((step * j + 2) + NY * (step * k + 2));
+                if !(0.4..0.95).contains(&anat.data[fine]) {
+                    continue;
+                }
+                let amp = 25.0 * t.data[fine];
+                for tr in 0..BOLD_TRS {
+                    let model = 1000.0 + 0.4 * tr as f32 + amp * response[tr];
+                    let noise = 12.0 * hash(i as i32, j as i32 * 131 + tr as i32, k as i32, 77);
+                    data[tr][at] = model + noise;
+                    fit[tr][at] = model;
+                }
+            }
+        }
+    }
+    let labels: Vec<String> = (0..BOLD_TRS).map(|t| format!("#{t}")).collect();
+    let make = |name: &str, frames| {
+        Dataset::synthetic_coarse(name, step, frames, labels.clone(), Some(BOLD_TR))
+    };
+    (make("bold", data), make("bold_fit", fit))
+}
+
 /// voxel index -> (lr, ap, is) mm
 fn ijk_to_mm(i: usize, j: usize, k: usize) -> (f32, f32, f32) {
     let lr = -(NX as f32) / 2.0 + i as f32; // i=0 is Right (negative lr)

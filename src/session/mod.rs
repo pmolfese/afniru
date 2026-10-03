@@ -9,6 +9,7 @@ pub mod action;
 pub mod controller;
 pub mod graph;
 pub mod overlay;
+pub mod series;
 pub mod store;
 
 use std::sync::Arc;
@@ -16,6 +17,7 @@ use std::sync::Arc;
 pub use action::Action;
 pub use controller::{ControllerState, Cursor};
 pub use overlay::{ClusterSettings, LayerId, OverlayChange, OverlayLayer, SizeUnit};
+pub use series::{SeriesChange, SeriesSettings};
 pub use store::{DatasetId, DatasetStore};
 
 use afni_core::afni_colors::AfniColorScale;
@@ -165,6 +167,61 @@ impl Session {
         false
     }
 
+    /// Is dataset `id` the underlay, a layer's dataset, read by a rule, or
+    /// plotted by the Graph?
+    fn in_use(&self, id: DatasetId) -> bool {
+        self.controllers.iter().any(|c| {
+            c.underlay == Some(id)
+                || c.series.source == Some(id)
+                || c.series.fit == Some(id)
+                || c.overlays.iter().any(|l| {
+                    l.dataset == id
+                        || l.bindings.values().any(
+                            |b| matches!(b, overlay::Binding::Sub { dataset, .. } if *dataset == id),
+                        )
+                })
+        })
+    }
+
+    /// Free the voxels of `id` if nothing uses it any more. Only datasets the
+    /// user chose (as underlay or overlay) are ever in memory, and a dataset
+    /// that is replaced is not kept.
+    fn release_if_unused(&mut self, id: DatasetId) {
+        if !self.in_use(id) {
+            self.store.release(id);
+        }
+    }
+
+    fn apply_series(&mut self, change: SeriesChange) {
+        use series::MAX_IGNORE;
+        let known = |s: &Self, id: DatasetId| s.store.get(id).is_some();
+        let s = match change {
+            SeriesChange::Source(Some(id)) if !self.store.get(id).is_some_and(|d| d.nvols > 1) => {
+                return;
+            }
+            SeriesChange::Fit(Some(id)) if !known(self, id) => return,
+            other => other,
+        };
+        let (old_source, old_fit) = (
+            self.controller().series.source,
+            self.controller().series.fit,
+        );
+        let cfg = &mut self.controller_mut().series;
+        match s {
+            SeriesChange::Source(id) => cfg.source = id,
+            SeriesChange::Fit(id) => cfg.fit = id,
+            SeriesChange::Matrix(n) if matches!(n, 1 | 3 | 5) => cfg.matrix = n,
+            SeriesChange::Ignore(n) => cfg.ignore = n.min(MAX_IGNORE),
+            SeriesChange::Detrend(d) => cfg.detrend = d,
+            SeriesChange::Percent(p) => cfg.percent = p,
+            SeriesChange::Stim(s) => cfg.stim = s,
+            SeriesChange::Matrix(_) => {}
+        }
+        for old in [old_source, old_fit].into_iter().flatten() {
+            self.release_if_unused(old);
+        }
+    }
+
     fn apply_layer_change(&mut self, id: LayerId, change: OverlayChange) {
         use overlay::first_stat_sub_brick;
         let Some(layer) = self.layer(id).cloned() else {
@@ -192,8 +249,10 @@ impl Session {
         else {
             return;
         };
+        let mut replaced = None;
         match change {
             OverlayChange::Dataset(d) => {
+                replaced = Some(layer.dataset);
                 layer.dataset = d;
                 layer.olay_sub = 0;
                 layer.thr_sub = first_stat_sub_brick(&ds).unwrap_or(0);
@@ -233,6 +292,9 @@ impl Session {
             }
             _ => {} // invalid values are ignored
         }
+        if let Some(old) = replaced {
+            self.release_if_unused(old);
+        }
     }
 
     /// Carry out an action. Invalid ones (unknown dataset, coordinates
@@ -249,11 +311,16 @@ impl Session {
                     .underlay()
                     .map(|old| ijk_to_ras(&old.ijk_to_ras, self.controller().cursor.ijk));
                 let kept = world.and_then(|ras| ras_to_ijk(&ds.ijk_to_ras, ds.dims, ras));
+                let old = self.controller().underlay;
                 let c = self.controller_mut();
                 c.cursor.ijk = kept.unwrap_or_else(|| ds.dims.map(|n| n / 2));
                 c.underlay = Some(id);
                 c.underlay_sub_brick = 0;
                 self.generation += 1;
+                // The dataset being replaced is not kept in memory.
+                if let Some(old) = old {
+                    self.release_if_unused(old);
+                }
             }
             Action::SetUnderlaySubBrick(t) => {
                 if self.underlay().is_some_and(|ds| t < ds.nvols) {
@@ -274,6 +341,7 @@ impl Session {
                 }
             }
             Action::RemoveOverlay(id) => {
+                let freed = self.layer(id).map(|l| l.dataset);
                 let layers = &mut self.controller_mut().overlays;
                 layers.retain(|l| l.id != id);
                 // Rules that read the removed layer lose that binding.
@@ -282,7 +350,17 @@ impl Session {
                         !matches!(b, overlay::Binding::LayerMask(x) | overlay::Binding::LayerValue(x) if *x == id)
                     });
                 }
+                if let Some(d) = freed {
+                    self.release_if_unused(d);
+                }
             }
+            Action::SaveClusters(_)
+            | Action::LoadStim
+            | Action::LoadDataset(..)
+            | Action::ScanFolder(_)
+            | Action::CloseFolder(_)
+            | Action::CancelLoad(_) => {} // the app does the file work
+            Action::Series(change) => self.apply_series(change),
             Action::MoveOverlay { id, to } => {
                 let layers = &mut self.controller_mut().overlays;
                 if let Some(from) = layers.iter().position(|l| l.id == id) {
@@ -446,9 +524,10 @@ mod tests {
 
     #[test]
     fn layer_ids_are_not_reused_after_removal() {
-        let (mut s, over, a) = with_overlay();
+        let (mut s, _over, a) = with_overlay();
         s.apply(Action::RemoveOverlay(a));
         assert!(s.controller().overlays.is_empty());
+        let over = s.store.add(synthetic::tmap()); // the removed layer's was freed
         s.apply(Action::AddOverlay(over));
         assert!(s.controller().overlays[0].id > a);
     }
@@ -816,5 +895,52 @@ mod tests {
             })),
         );
         assert_ne!(layer(&s, id).display_key(), key);
+    }
+
+    // ---- Memory ----
+
+    #[test]
+    fn a_replaced_underlay_and_a_removed_overlay_are_freed_but_used_ones_stay() {
+        let (mut s, over, layer_id) = with_overlay();
+        let first = s.controller().underlay.unwrap();
+        let second = s.store.add(synthetic::phantom());
+        s.apply(Action::SetUnderlay(second));
+        assert!(s.store.get(first).is_none(), "the old underlay is freed");
+        assert!(s.store.get(over).is_some(), "the overlay's dataset stays");
+        // A dataset used as both underlay and overlay survives either change.
+        s.apply(Action::AddOverlay(second));
+        let third = s.store.add(synthetic::phantom());
+        s.apply(Action::SetUnderlay(third));
+        assert!(s.store.get(second).is_some(), "still a layer");
+        s.apply(Action::RemoveOverlay(layer_id));
+        assert!(
+            s.store.get(over).is_none(),
+            "the removed layer's dataset is freed"
+        );
+        // Asking for a freed dataset is refused, not a crash.
+        s.apply(Action::AddOverlay(over));
+        assert_eq!(s.controller().overlays.len(), 1);
+    }
+
+    #[test]
+    fn a_dataset_read_by_a_rule_or_plotted_is_not_freed() {
+        let (mut s, over, id) = with_overlay();
+        let other = s.store.add(synthetic::tmap());
+        s.apply(Action::Layer(
+            id,
+            OverlayChange::Bind(
+                'c',
+                Some(Binding::Sub {
+                    dataset: other,
+                    sub: 0,
+                }),
+            ),
+        ));
+        s.apply(Action::Layer(id, OverlayChange::Dataset(other)));
+        assert!(
+            s.store.get(over).is_none(),
+            "the replaced layer dataset is freed"
+        );
+        assert!(s.store.get(other).is_some());
     }
 }

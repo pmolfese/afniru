@@ -72,6 +72,70 @@ impl ClusterOutcome {
     }
 }
 
+/// The column the cluster table is ordered by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortBy {
+    /// By rank (size, largest first): the order they were found in.
+    #[default]
+    Rank,
+    /// By number of voxels.
+    Voxels,
+    /// By the absolute value of the peak.
+    Peak,
+}
+
+/// `rows` in the order of `by`; `descending` reverses it. Rank 1 first (and
+/// the largest, and the strongest peak first) is the natural order, so
+/// `descending == false` gives that; ties keep rank order.
+pub fn sorted(rows: &[ClusterRow], by: SortBy, descending: bool) -> Vec<&ClusterRow> {
+    let mut out: Vec<&ClusterRow> = rows.iter().collect();
+    match by {
+        SortBy::Rank => {}
+        SortBy::Voxels => out.sort_by_key(|r| std::cmp::Reverse(r.voxels)),
+        SortBy::Peak => out.sort_by(|a, b| b.peak.abs().total_cmp(&a.peak.abs())),
+    }
+    if descending {
+        out.reverse();
+    }
+    out
+}
+
+/// The table as text (tab separated, one cluster per line, coordinates in
+/// `orient`), for the clipboard and for files. `heading` says what was
+/// clustered and how. For a mask there is no peak or mean, so those columns
+/// are left out.
+pub fn report_text(
+    out: &ClusterOutcome,
+    orient: crate::geom::CoordOrient,
+    heading: &str,
+) -> String {
+    use std::fmt::Write;
+    let mut text = format!("# {heading}\n# coordinates: {}\n", orient.name());
+    text.push_str(if out.has_values {
+        "#vox\tvolume_uL\tCM_x\tCM_y\tCM_z\tpeak\tpeak_x\tpeak_y\tpeak_z\tmean\n"
+    } else {
+        "#vox\tvolume_uL\tCM_x\tCM_y\tCM_z\n"
+    });
+    for r in &out.rows {
+        let [cx, cy, cz] = orient.ras_to_coords(r.center_ras);
+        let _ = write!(
+            text,
+            "{}\t{:.3}\t{cx:.1}\t{cy:.1}\t{cz:.1}",
+            r.voxels, r.volume_ul
+        );
+        if out.has_values {
+            let [px, py, pz] = orient.ras_to_coords(r.peak_ras);
+            let _ = write!(
+                text,
+                "\t{:.4}\t{px:.1}\t{py:.1}\t{pz:.1}\t{:.4}",
+                r.peak, r.mean
+            );
+        }
+        text.push('\n');
+    }
+    text
+}
+
 /// What is clustered.
 #[derive(Debug, Clone, Copy)]
 pub enum Input<'a> {
@@ -453,6 +517,65 @@ mod tests {
         assert_eq!(out.survivors.len(), 8 * 5 * 6);
         let kept = out.survivors.iter().filter(|s| **s).count();
         assert!(kept > out.total_voxels, "{kept} vs {}", out.total_voxels);
+    }
+
+    #[test]
+    fn rows_sort_by_size_or_peak_and_reverse() {
+        let ds = fixture("clust+orig");
+        let out = cluster(&ds, true, 1.5, &settings(2, 2.0, true)); // 23 22 9 2
+        let ranks =
+            |by, desc| -> Vec<u32> { sorted(&out.rows, by, desc).iter().map(|r| r.rank).collect() };
+        assert_eq!(ranks(SortBy::Rank, false), [1, 2, 3, 4]);
+        assert_eq!(ranks(SortBy::Rank, true), [4, 3, 2, 1]);
+        assert_eq!(ranks(SortBy::Voxels, true), [4, 3, 2, 1]);
+        // Peaks: -5.2776, 4.9675, 5.0318, -4.8031 -> by |peak|: 1, 3, 2, 4.
+        assert_eq!(ranks(SortBy::Peak, false), [1, 3, 2, 4]);
+        assert_eq!(ranks(SortBy::Peak, true), [4, 2, 3, 1]);
+    }
+
+    #[test]
+    fn the_report_lists_every_cluster_in_the_chosen_orientation() {
+        use crate::geom::CoordOrient;
+        let ds = fixture("clust+orig");
+        let out = cluster(&ds, true, 1.5, &settings(2, 2.0, true));
+        let text = report_text(&out, CoordOrient::Rai, "clust, NN2");
+        let data: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(data.len(), 4);
+        let first: Vec<&str> = data[0].split('\t').collect();
+        assert_eq!(first[0], "23");
+        assert_eq!(first[1], "276.000"); // 23 x 12 µL
+        // Peak -5.2776 at RAI (4, -0.5, 9), as 3dClusterize reports.
+        assert_eq!(&first[5..9], ["-5.2776", "4.0", "-0.5", "9.0"]);
+        assert!(text.starts_with("# clust, NN2\n# coordinates: RAI"));
+        // In LPI the x and y signs flip.
+        let lpi = report_text(&out, CoordOrient::Lpi, "x");
+        assert!(
+            lpi.lines()
+                .find(|l| !l.starts_with('#'))
+                .unwrap()
+                .contains("\t-4.0\t0.5\t9.0")
+        );
+    }
+
+    #[test]
+    fn a_masks_report_has_no_peak_columns() {
+        use crate::geom::CoordOrient;
+        let ds = fixture("clust+orig");
+        let on: Vec<bool> = ds.frame(0).unwrap().iter().map(|v| *v > 1.5).collect();
+        let out = run(
+            Input::Mask(&on),
+            &grid(&ds),
+            Selection {
+                signed: false,
+                threshold: 0.0,
+            },
+            &settings(2, 1.0, true),
+            &grid(&ds),
+        )
+        .unwrap();
+        let text = report_text(&out, CoordOrient::Rai, "mask");
+        assert!(text.contains("#vox\tvolume_uL\tCM_x\tCM_y\tCM_z\n"));
+        assert!(!text.contains("peak"));
     }
 
     #[test]

@@ -18,7 +18,22 @@ cargo run --release -- anat+orig.HEAD         # AFNI dataset
 cargo run --release -- T1.nii.gz func.nii.gz  # NIfTI; first file is the underlay, second the overlay
 ```
 
-You can also use File ▸ Open… or drop a file on the window.
+You can also use File ▸ Open…, or drop a file on the window.
+
+**Folders.** Give a folder instead of (or as well as) datasets, or use File ▸ Open
+folder…, and the Datasets card lists the AFNI (`.HEAD`/`.BRIK`) and NIfTI
+(`.nii`, `.nii.gz`) datasets in it, each with **ULay** and **+ Ovl** buttons.
+Only the names are read; a dataset is loaded when you pick it (or name it on
+the command line), and a dataset you replace or remove is dropped from
+memory. `AFNIRU_FOLDER_BROWSER = NO` in `~/.afniru` turns the listing off. A
+folder that is an `afni_proc.py` results directory also opens in the
+Processing rail.
+
+**Loading** happens in the background, so the window stays usable while a big
+dataset (or a network drive) is read. The status bar and the Datasets card show
+each dataset being read with its size and the time so far, and a button to stop
+waiting. Datasets are applied in the order you asked for them, however fast
+each reads.
 
 Click or drag in a view to move the crosshair; arrow keys move it one voxel in the view under the mouse; Page Up/Down change that view's slice. The toolbar switches layouts (1×3, 3×1, 2×2), swaps radiological/neurological, and hides the crosshair lines.
 
@@ -31,7 +46,7 @@ first, with an eye, opacity, a handle to drag them into a new order, and
 **Add overlay**. Each layer has its own **Define Overlay** card with the color bar and a
 threshold slider beside it, the color scale (`AFNI_COLORSCALE_DEFAULT` sets the
 starting one), ± or positive-only, AFNI's **A** (fade values below the
-threshold) and **B** (outline the suprathreshold regions), the color range
+threshold) and **B** (box the suprathreshold regions: they stay filled, with A's fade if on, and get a solid outline), the color range
 (automatic or fixed), opacity, the threshold, and for statistics the **p** and
 the FDR **q** of the threshold. Type a p-value to set the threshold from it.
 A new layer starts at threshold 0, as in AFNI. The Crosshair card lists every

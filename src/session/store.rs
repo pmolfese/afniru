@@ -12,19 +12,26 @@ pub struct DatasetId(pub usize);
 /// All opened datasets, in the order they were opened.
 #[derive(Debug, Default)]
 pub struct DatasetStore {
-    items: Vec<Arc<Dataset>>,
+    items: Vec<Option<Arc<Dataset>>>,
 }
 
 impl DatasetStore {
     /// Store a dataset and return its id.
     pub fn add(&mut self, dataset: Dataset) -> DatasetId {
-        self.items.push(Arc::new(dataset));
+        self.items.push(Some(Arc::new(dataset)));
         DatasetId(self.items.len() - 1)
     }
 
     /// The dataset with this id.
     pub fn get(&self, id: DatasetId) -> Option<&Arc<Dataset>> {
-        self.items.get(id.0)
+        self.items.get(id.0).and_then(Option::as_ref)
+    }
+
+    /// Free a dataset's voxels. Its id stays unused; nothing may still read it.
+    pub fn release(&mut self, id: DatasetId) {
+        if let Some(slot) = self.items.get_mut(id.0) {
+            *slot = None;
+        }
     }
 
     /// Every dataset with its id, in opening order.
@@ -32,7 +39,7 @@ impl DatasetStore {
         self.items
             .iter()
             .enumerate()
-            .map(|(i, d)| (DatasetId(i), d))
+            .filter_map(|(i, d)| d.as_ref().map(|d| (DatasetId(i), d)))
     }
 
     /// Number of datasets.

@@ -8,6 +8,7 @@ use egui::{Color32, Rect, RichText, Sense, Ui, pos2, vec2};
 use super::theme::Theme;
 use super::view_state::{Layout, ViewOptions};
 use crate::data::{Dataset, Source};
+use crate::loader::LoadingInfo;
 
 /// Something the user asked for in the shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +19,8 @@ pub enum Action {
     OpenDemo,
     /// File → Open results directory…
     OpenResults,
+    /// File → Open folder…
+    OpenFolder,
     /// File → Quit.
     Quit,
 }
@@ -29,6 +32,10 @@ pub fn menu_bar(ui: &mut Ui) -> Option<Action> {
         ui.menu_button("File", |ui| {
             if ui.button("Open…").clicked() {
                 action = Some(Action::Open);
+                ui.close();
+            }
+            if ui.button("Open folder…").clicked() {
+                action = Some(Action::OpenFolder);
                 ui.close();
             }
             if ui.button("Open demo phantom").clicked() {
@@ -131,9 +138,25 @@ pub fn status_bar(
     current: Option<&Dataset>,
     error: Option<&str>,
     conventions: &str,
+    loading: &[LoadingInfo],
 ) {
     ui.horizontal(|ui| {
-        if let Some(e) = error {
+        if let Some(first) = loading.first() {
+            ui.add(
+                egui::ProgressBar::new(0.0)
+                    .desired_width(110.0)
+                    .animate(true),
+            );
+            let more = if loading.len() > 1 {
+                format!(" (+{} more)", loading.len() - 1)
+            } else {
+                String::new()
+            };
+            ui.label(
+                RichText::new(format!("Loading {}…{more}", loading_text(first)))
+                    .color(theme.accent),
+            );
+        } else if let Some(e) = error {
             ui.label(RichText::new(e).color(theme.error));
         } else if let Some(d) = current {
             ui.label(RichText::new(d.summary()).color(theme.text_dim));
@@ -147,4 +170,28 @@ pub fn status_bar(
             ui.label(RichText::new(conventions).color(theme.text_faint));
         });
     });
+}
+
+/// `anat+tlrc  1.2 GB  12 s` for a load in progress.
+pub fn loading_text(l: &LoadingInfo) -> String {
+    let size = l
+        .bytes
+        .map_or(String::new(), |b| format!("  {}", format_bytes(b)));
+    format!("{}{size}  {} s", l.name, l.elapsed.as_secs())
+}
+
+/// `512 KB`, `1.2 GB`.
+pub fn format_bytes(b: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = b as f64;
+    let mut unit = 0;
+    while v >= 1024.0 && unit + 1 < UNITS.len() {
+        v /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{b} B")
+    } else {
+        format!("{v:.1} {}", UNITS[unit])
+    }
 }
