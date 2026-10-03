@@ -7,6 +7,7 @@ description = "A Rust rebuild of the AFNI volume viewer."
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+afni-core = { git = "https://github.com/pmolfese/afni-core", branch = "main" }
 afni-io = { path = "../afni-io" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
@@ -14,8 +15,10 @@ clap = { version = "4", features = ["derive"] }
 # already select the wgpu backend; `persistence` is for workspace storage.
 eframe = { version = "0.36.2", features = ["persistence"] }
 egui = "0.36.2"
+egui-phosphor = { version = "0.14", default-features = false, features = ["regular"] }
 glam = "0.33"
 rfd = "0.17"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 egui_kittest = { version = "0.36.2", features = ["wgpu", "snapshot"] }

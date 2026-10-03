@@ -454,6 +454,11 @@ Each tool's **logic** (e.g. `clusterize::run(&mask, &settings) -> Vec<Cluster>`)
 lives in its `mod.rs`, free of egui and unit tested. The egui code lives in
 `card.rs`.
 
+> **As built:** `data/` holds a `Dataset` (summary plus voxels) rather than the
+> `Volume`/`SubBrick` below, and `geom/coords.rs` carries the coordinate
+> conventions. The rule stands: only `data/load.rs` touches afni-io's volume
+> types. See `docs/ARCHITECTURE.md` for what exists.
+
 ### Internal `Volume` type: insulate from afni-io churn
 
 afniru must not depend on afni-io's API shape outside `data/load.rs`:
@@ -514,6 +519,11 @@ Check each against the C source before implementing:
   the slice, and each view's slice follows the crosshair.
 - **Lock** (between controllers): crosshair/slice/zoom linking, as in AFNI's
   Define Datamode → Lock.
+
+> **Update:** `afni-core` now exists and covers most of the table below
+> (colors, thresholds, overlay evaluation, p-values, FDR, volume clustering).
+> Use it directly instead of copying from sumaru; the `afni-io` p-value work in
+> "afni-io status" is not needed. The table is kept for the history.
 
 ## Borrowing from sumaru
 

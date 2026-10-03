@@ -15,10 +15,72 @@ afni-core from GitHub instead).
 ```sh
 cargo run --release -- --demo                 # built-in phantom, no data needed
 cargo run --release -- anat+orig.HEAD         # AFNI dataset
-cargo run --release -- T1.nii.gz func.nii.gz  # NIfTI; first file is the underlay
+cargo run --release -- T1.nii.gz func.nii.gz  # NIfTI; first file is the underlay, second the overlay
 ```
 
 You can also use File ▸ Open… or drop a file on the window.
+
+Click or drag in a view to move the crosshair; arrow keys move it one voxel in the view under the mouse; Page Up/Down change that view's slice. The toolbar switches layouts (1×3, 3×1, 2×2), swaps radiological/neurological, and hides the crosshair lines.
+
+## The overlay
+
+Every dataset after the first on the command line is drawn in color over the
+underlay as an **overlay layer** (later ones on top), resampled onto the
+underlay's grid (nearest neighbor). The Datasets card lists the layers, top
+first, with an eye, opacity, a handle to drag them into a new order, and
+**Add overlay**. Each layer has its own **Define Overlay** card with the color bar and a
+threshold slider beside it, the color scale (`AFNI_COLORSCALE_DEFAULT` sets the
+starting one), ± or positive-only, AFNI's **A** (fade values below the
+threshold) and **B** (outline the suprathreshold regions), the color range
+(automatic or fixed), opacity, the threshold, and for statistics the **p** and
+the FDR **q** of the threshold. Type a p-value to set the threshold from it.
+A new layer starts at threshold 0, as in AFNI. The Crosshair card lists every
+layer's value at the crosshair with a swatch of the color it is drawn in.
+The statistic comes from the dataset header (`3dinfo` shows it).
+
+### Clusterize
+
+Each layer's card ends with an **ATTACH** row. The **Cluster** chip hooks a
+Clusterize card under that layer (the Cluster tile hooks the top layer): the
+card is indented under the layer's, joined by a spine whose ⛓ socket folds the
+pair into one line. Clusterize groups the voxels that pass the layer's
+threshold by how they touch (**NN** 1 faces, 2 faces and edges, 3 corners too),
+drops clusters smaller than **min** (voxels or µL), and lists the rest: size,
+peak and where it is. A click on a row jumps to the peak; the cluster under the
+crosshair is gold. **bisided** clusters positive and negative values
+separately; **only clusters** draws just the surviving voxels. The numbers match
+`3dClusterize` (checked on a committed dataset). A mask layer is clustered too.
+Dragging a threshold keeps the old clusters until you let go.
+
+### Masks and rules
+
+A layer can be shown as a **mask** instead of a color map: every voxel is on or
+off, and every "on" voxel is one color. The mask is on where the layer's
+threshold passes, or where a **rule** is not zero. A rule is a `3dcalc`
+expression (`step(a-3)*step(b-2)`, `within(a,2,4)`, `ifelse(…)`, …) or, as an
+afni-core extension, a C-style one (`a>3 && b<=2`, `a>0 ? a : 0`); its letters
+stand for this layer's OLay or Thr, any dataset's sub-brick, `x y z` / `i j k`,
+or **another layer** (where it is drawn, or its value). So one layer can show
+where A is, another where B is, and a third `a*b` where both are, with A and B
+hidden if you like. Rules use 3dcalc's language, so `step(a-3)` works as in AFNI;
+`a>3`, `<=`, `==`, `!=`, `&&`, `||`, `!` and `c ? x : y` are added (AFNI itself
+rejects them). See `afni-core`'s `docs/DIFFERENCES_FROM_AFNI.md` §13.
+
+## The controller
+
+The left sidebar holds tool cards. The shelf of tiles turns cards on and off
+(gold = open, ring = folded, dim = off; the dimmest tiles are tools not built
+yet). Click a card's title to fold it, drag its handle to reorder, × hides it.
+`«` collapses the sidebar to an icon rail; clicking an icon opens that card as
+a pop-over. Arrangements are saved as workspaces (the gear menu).
+
+## The Processing rail
+
+For an `afni_proc.py` run, the rail on the right shows the pipeline steps with
+their health. afniru finds the run from the working directory or the folder of
+a file you open; or pass a results directory (`afniru sub-01.results`), use
+File ▸ Open results directory…, or drop it on the window. See
+[`docs/PROCESSING_RAIL.md`](docs/PROCESSING_RAIL.md).
 
 ## Settings
 

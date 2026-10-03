@@ -14,6 +14,10 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use afni_core::afni_colors::AfniColorScale;
+
+use crate::geom::CoordOrient;
+
 /// Which color theme to use for the application chrome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemeChoice {
@@ -37,7 +41,7 @@ pub enum CanvasBackground {
 }
 
 /// Parsed preferences.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prefs {
     /// `AFNIRU_THEME = System | Dark | Light`.
     pub theme: ThemeChoice,
@@ -46,8 +50,25 @@ pub struct Prefs {
     /// `AFNI_LEFT_IS_LEFT = YES | NO`. `NO` (AFNI's default) is radiological:
     /// the subject's right is on the screen's left.
     pub left_is_left: bool,
+    /// `AFNI_ORIENT = RAI | LPI`: how coordinates are written.
+    pub coord_orient: CoordOrient,
+    /// `AFNI_COLORSCALE_DEFAULT = name`: the color scale a new overlay starts with.
+    pub colorscale: AfniColorScale,
     /// `AFNI_SESSTRAIL = n`: directory levels kept in dataset names.
     pub sess_trail: usize,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Self {
+            theme: ThemeChoice::default(),
+            canvas: CanvasBackground::default(),
+            left_is_left: false,
+            coord_orient: CoordOrient::default(),
+            colorscale: AfniColorScale::afni_default(),
+            sess_trail: 0,
+        }
+    }
 }
 
 /// The documented default file written on first run.
@@ -77,6 +98,22 @@ pub const DEFAULT_FILE: &str = "\
    AFNI_LEFT_IS_LEFT        = NO      // NO  = radiological (subject's right
                                       //       on screen left), AFNI's default
                                       // YES = neurological
+
+   AFNI_ORIENT              = RAI     // how coordinates are written (afniru
+                                      // supports RAI and LPI):
+                                      // RAI = x grows to the Left, y to the
+                                      //       Posterior (AFNI's default)
+                                      // LPI = x grows to the Right, y to the
+                                      //       Anterior (= RAS+)
+
+   AFNI_COLORSCALE_DEFAULT  = Reds_and_Blues_Inv  // the color scale a new
+                                      // overlay starts with (AFNI's default).
+                                      // One of: Reds_and_Blues_Inv,
+                                      // Spectrum:red_to_blue, Spectrum:red_to_blue+gap,
+                                      // Spectrum:yellow_to_cyan, Spectrum:yellow_to_cyan+gap,
+                                      // Spectrum:yellow_to_red, Color_circle_AJJ,
+                                      // Color_circle_ZSS, Reds_and_Blues,
+                                      // Reds_and_Blues_w_Green
 
    AFNI_SESSTRAIL           = 0       // directory levels shown before a
                                       // dataset's name (0 = name only)
@@ -144,8 +181,8 @@ impl Prefs {
         prefs
     }
 
-    fn set(&mut self, key: &str, value: &str) {
-        let value = value.to_ascii_lowercase();
+    fn set(&mut self, key: &str, original: &str) {
+        let value = original.to_ascii_lowercase();
         match key {
             "AFNIRU_THEME" => match value.as_str() {
                 "system" => self.theme = ThemeChoice::System,
@@ -163,6 +200,16 @@ impl Prefs {
                 "no" | "false" | "0" => self.left_is_left = false,
                 _ => {}
             },
+            "AFNI_ORIENT" => match value.as_str() {
+                "rai" => self.coord_orient = CoordOrient::Rai,
+                "lpi" => self.coord_orient = CoordOrient::Lpi,
+                _ => {}
+            },
+            "AFNI_COLORSCALE_DEFAULT" => {
+                if let Some(scale) = AfniColorScale::from_name(original) {
+                    self.colorscale = scale;
+                }
+            }
             "AFNI_SESSTRAIL" => {
                 if let Ok(n) = value.parse() {
                     self.sess_trail = n;
@@ -194,6 +241,31 @@ mod tests {
         assert_eq!(p.canvas, CanvasBackground::Black);
         assert!(!p.left_is_left);
         assert_eq!(p.sess_trail, 0);
+        assert_eq!(p.coord_orient, CoordOrient::Rai);
+        assert_eq!(p.colorscale, AfniColorScale::afni_default());
+        assert_eq!(p.colorscale, AfniColorScale::RedsAndBluesInv);
+    }
+
+    #[test]
+    fn colorscale_default_takes_afni_names_and_ignores_unknown_ones() {
+        let p = Prefs::parse("AFNI_COLORSCALE_DEFAULT = Reds_and_Blues");
+        assert_eq!(p.colorscale, AfniColorScale::RedsAndBlues);
+        let p = Prefs::parse("AFNI_COLORSCALE_DEFAULT = Spectrum:red_to_blue");
+        assert_eq!(p.colorscale, AfniColorScale::SpectrumRedToBlue);
+        let p = Prefs::parse("AFNI_COLORSCALE_DEFAULT = Nope");
+        assert_eq!(p.colorscale, AfniColorScale::afni_default());
+    }
+
+    #[test]
+    fn afni_orient_accepts_rai_and_lpi_only() {
+        assert_eq!(
+            Prefs::parse("AFNI_ORIENT = lpi").coord_orient,
+            CoordOrient::Lpi
+        );
+        assert_eq!(
+            Prefs::parse("AFNI_ORIENT = LPS").coord_orient,
+            CoordOrient::Rai
+        );
     }
 
     #[test]

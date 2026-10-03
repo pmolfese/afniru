@@ -9,6 +9,8 @@ pub mod synthetic;
 
 use std::path::PathBuf;
 
+use afni_core::curve::ThresholdCurve;
+use afni_core::stat::StatSpec;
 use afni_io::geometry::Mat44;
 use afni_io::volume::Volume;
 
@@ -49,8 +51,17 @@ pub struct Dataset {
     pub tr: Option<f64>,
     /// One label per sub-brick.
     pub labels: Vec<String>,
-    /// Voxel-to-RAS matrix.
+    /// The statistic each sub-brick holds (`None` for plain data).
+    pub stats: Vec<Option<StatSpec>>,
+    /// The FDR curve of each sub-brick, when the file has one.
+    pub fdr_curves: Vec<Option<ThresholdCurve>>,
+    /// Voxel-to-RAS matrix of the display grid. For AFNI datasets this is
+    /// the cardinal grid (`ORIGIN`/`DELTA`), which is what AFNI shows and
+    /// `3dmaskdump -xyz` reports; for NIfTI it is the file's affine.
     pub ijk_to_ras: Mat44,
+    /// For an oblique AFNI dataset, the true scanner-space matrix
+    /// (`IJK_TO_DICOM_REAL`, `3dinfo -aform_real`), as RAS.
+    pub ijk_to_ras_real: Option<Mat44>,
     /// Which voxel axis is which anatomical axis.
     pub orient: GridOrient,
     /// The voxels.
@@ -80,9 +91,12 @@ impl Dataset {
             voxel_mm: [1.0; 3],
             nvols: frames.len(),
             tr: None,
+            stats: vec![None; labels.len()],
+            fdr_curves: vec![None; labels.len()],
             labels,
             orient: GridOrient::from_ijk_to_ras(&ijk_to_ras),
             ijk_to_ras,
+            ijk_to_ras_real: None,
             data: Data::Synthetic(frames),
         }
     }
@@ -106,6 +120,9 @@ impl Dataset {
         );
         if let Some(tr) = self.tr {
             s.push_str(&format!("  TR {}s", trim_float(tr)));
+        }
+        if self.ijk_to_ras_real.is_some() {
+            s.push_str("  oblique");
         }
         s
     }

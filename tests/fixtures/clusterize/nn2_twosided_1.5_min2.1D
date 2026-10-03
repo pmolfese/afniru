@@ -1,0 +1,19 @@
+#
+#  Cluster report 
+#[ Dataset prefix      = clust ]
+#[ Threshold vol       = [0] 'Tstat' ]
+#[ Supplement dat vol  = [0] 'Tstat' ]
+#[ Option summary      = 2sided,-1.5,1.5,clust_nvox,2,NN2 ]
+#[ Threshold value(s)  = left-tail thr=-1.500000;  right-tail thr=1.500000 ]
+#[ Aux. stat. info.    = DEGREES-of-FREEDOM : 118  ]
+#[ Nvoxel threshold    = 2;  Volume threshold = 24.000 ]
+#[ Single voxel volume = 12.000 (microliters) ]
+#[ Neighbor type, NN   = 2 ]
+#[ Voxel datum type    = float ]
+#[ Voxel dimensions    = 2.000 mm X 2.000 mm X 3.000 mm ]
+#[ Coordinates Order   = RAI ]
+#[ Mean and SEM based on signed voxel intensities ]
+#
+#Volume  CM RL  CM AP  CM IS  minRL  maxRL  minAP  maxAP  minIS  maxIS    Mean     SEM    Max Int  MI RL  MI AP  MI IS
+#------  -----  -----  -----  -----  -----  -----  -----  -----  -----  -------  -------  -------  -----  -----  -----
+     57    1.1    1.6    4.3   -2.0    4.0   -2.5    5.5   -3.0   12.0   0.4029   0.4181  -5.2776    4.0   -0.5    9.0 

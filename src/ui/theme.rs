@@ -39,9 +39,20 @@ pub struct Theme {
     /// AFNI gold.
     pub accent: Color32,
     /// Muted accent for fills.
+    #[expect(dead_code, reason = "tool shelf tiles and card chrome (M3)")]
     pub accent_dim: Color32,
     /// Error text.
     pub error: Color32,
+    /// Health: all good.
+    pub good: Color32,
+    /// Health: a caution.
+    pub caution: Color32,
+    /// Health: failed.
+    pub danger: Color32,
+    /// Health: unknown or not assessed.
+    pub unknown: Color32,
+    /// Selection (the selected processing step); independent of health.
+    pub select: Color32,
     /// Behind the slice image.
     pub canvas: Color32,
 }
@@ -62,6 +73,11 @@ impl Theme {
             accent: Color32::from_rgb(245, 196, 66),
             accent_dim: Color32::from_rgb(92, 76, 34),
             error: Color32::from_rgb(255, 120, 110),
+            good: Color32::from_rgb(63, 185, 120),
+            caution: Color32::from_rgb(240, 180, 50),
+            danger: Color32::from_rgb(240, 90, 80),
+            unknown: Color32::from_rgb(120, 128, 140),
+            select: Color32::from_rgb(86, 156, 255),
             canvas: Color32::BLACK,
         }
     }
@@ -81,6 +97,11 @@ impl Theme {
             accent: Color32::from_rgb(214, 152, 10),
             accent_dim: Color32::from_rgb(252, 238, 200),
             error: Color32::from_rgb(190, 40, 30),
+            good: Color32::from_rgb(30, 150, 85),
+            caution: Color32::from_rgb(200, 130, 0),
+            danger: Color32::from_rgb(210, 50, 45),
+            unknown: Color32::from_rgb(130, 138, 150),
+            select: Color32::from_rgb(40, 110, 230),
             canvas: Color32::BLACK,
         }
     }

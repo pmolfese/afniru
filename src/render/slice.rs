@@ -2,6 +2,69 @@
 
 use crate::geom::{GridOrient, Plane, letter};
 
+/// How a plane's pixels map to voxels: the single place that knows which
+/// voxel axis runs across, which runs down, and which way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaneMap {
+    /// Pixels across.
+    pub width: usize,
+    /// Pixels down.
+    pub height: usize,
+    /// Voxel axis running across the screen.
+    h_axis: usize,
+    /// Voxel axis running down the screen.
+    v_axis: usize,
+    /// Voxel axis that is constant in the plane (the slice axis).
+    pub fixed_axis: usize,
+    /// Does a rising column also raise the voxel index?
+    h_same: bool,
+    /// Does a rising row also raise the voxel index?
+    v_same: bool,
+}
+
+impl PlaneMap {
+    /// The mapping for `plane` on a grid of size `dims`.
+    pub fn new(dims: [usize; 3], orient: &GridOrient, plane: Plane, left_is_left: bool) -> Self {
+        let (h, v) = plane.screen_axes(left_is_left);
+        let (h_map, v_map) = (orient.axes[h.ras_axis], orient.axes[v.ras_axis]);
+        Self {
+            width: dims[h_map.voxel_axis],
+            height: dims[v_map.voxel_axis],
+            h_axis: h_map.voxel_axis,
+            v_axis: v_map.voxel_axis,
+            fixed_axis: orient.slice_axis(plane),
+            h_same: (h.dir > 0) == h_map.positive,
+            v_same: (v.dir > 0) == v_map.positive,
+        }
+    }
+
+    /// The voxel shown at pixel (`col`, `row`) of slice `index`.
+    pub fn voxel(&self, col: usize, row: usize, index: usize) -> [usize; 3] {
+        let mut ijk = [0; 3];
+        ijk[self.fixed_axis] = index;
+        ijk[self.h_axis] = if self.h_same {
+            col
+        } else {
+            self.width - 1 - col
+        };
+        ijk[self.v_axis] = if self.v_same {
+            row
+        } else {
+            self.height - 1 - row
+        };
+        ijk
+    }
+
+    /// The pixel (`col`, `row`) where voxel `ijk` appears in its slice.
+    pub fn pixel(&self, ijk: [usize; 3]) -> (usize, usize) {
+        let (h, v) = (ijk[self.h_axis], ijk[self.v_axis]);
+        (
+            if self.h_same { h } else { self.width - 1 - h },
+            if self.v_same { v } else { self.height - 1 - v },
+        )
+    }
+}
+
 /// A slice ready for display: row-major, top row first, left pixel first.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Slice {
@@ -45,30 +108,20 @@ pub fn extract(
     if frame.len() != nx * ny * nz || index >= slice_count(dims, orient, plane) {
         return None;
     }
-    let (h, v) = plane.screen_axes(left_is_left);
-    let (h_map, v_map) = (orient.axes[h.ras_axis], orient.axes[v.ras_axis]);
-    let (hv, vv) = (h_map.voxel_axis, v_map.voxel_axis);
-    let (width, height) = (dims[hv], dims[vv]);
-    // Does a rising screen coordinate also raise the voxel index?
-    let h_same = (h.dir > 0) == h_map.positive;
-    let v_same = (v.dir > 0) == v_map.positive;
-    let fixed = orient.slice_axis(plane);
-
-    let mut data = Vec::with_capacity(width * height);
-    let mut ijk = [0usize; 3];
-    ijk[fixed] = index;
-    for row in 0..height {
-        ijk[vv] = if v_same { row } else { height - 1 - row };
-        for col in 0..width {
-            ijk[hv] = if h_same { col } else { width - 1 - col };
-            data.push(frame[ijk[0] + nx * (ijk[1] + ny * ijk[2])]);
+    let map = PlaneMap::new(dims, orient, plane, left_is_left);
+    let mut data = Vec::with_capacity(map.width * map.height);
+    for row in 0..map.height {
+        for col in 0..map.width {
+            let [i, j, k] = map.voxel(col, row, index);
+            data.push(frame[i + nx * (j + ny * k)]);
         }
     }
+    let (h, v) = plane.screen_axes(left_is_left);
     Some(Slice {
-        width,
-        height,
+        width: map.width,
+        height: map.height,
         data,
-        pixel_mm: [voxel_mm[hv], voxel_mm[vv]],
+        pixel_mm: [voxel_mm[map.h_axis], voxel_mm[map.v_axis]],
         // The left edge is where the screen coordinate is smallest, i.e. the
         // end opposite to its direction of increase.
         left: letter(h.ras_axis, h.dir < 0),
@@ -151,6 +204,34 @@ mod tests {
         assert_eq!(s.data[0], 401.0); // left = j=0, top = k=4
         assert_eq!(s.data[3], 431.0); // right = j=3
         assert_eq!((s.left, s.right, s.top, s.bottom), ('A', 'P', 'S', 'I'));
+    }
+
+    #[test]
+    fn pixel_and_voxel_are_inverses() {
+        let m = [
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let dims = [2, 3, 4];
+        for orient in [
+            GridOrient::from_ijk_to_ras(&RAI),
+            GridOrient::from_ijk_to_ras(&m),
+        ] {
+            for plane in Plane::ALL {
+                for lil in [false, true] {
+                    let map = PlaneMap::new(dims, &orient, plane, lil);
+                    for row in 0..map.height {
+                        for col in 0..map.width {
+                            let ijk = map.voxel(col, row, 1);
+                            assert_eq!(ijk[map.fixed_axis], 1);
+                            assert_eq!(map.pixel(ijk), (col, row));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

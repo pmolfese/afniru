@@ -1,127 +1,195 @@
-//! One slice view: header, image, orientation letters, scale bar, slice
-//! slider and window controls.
+//! One plane's view card: header, image with crosshair, orientation letters,
+//! scale bar, zoom, and slice slider.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use afni_core::color::Rgba;
 use egui::{
-    Align2, Color32, ColorImage, FontId, Key, Pos2, Rect, RichText, Sense, Stroke, TextureHandle,
+    Align2, Color32, ColorImage, FontId, Pos2, Rect, RichText, Sense, Stroke, TextureHandle,
     TextureOptions, Ui, pos2, vec2,
 };
 
 use super::theme::{self, Theme};
+use super::view_state::ViewOptions;
 use crate::data::Dataset;
-use crate::geom::{Plane, letter};
+use crate::geom::Plane;
+use crate::geom::coords::{ijk_to_ras, magnitude_and_letter};
 use crate::render::compose::{self, Window};
-use crate::render::slice::{self, Slice};
+use crate::render::layers::{self, LayerInput};
+use crate::render::overlay::{OverlayFrames, outline_only};
+use crate::render::slice::{self, PlaneMap, Slice};
+use crate::session::store::DatasetId;
+use crate::session::{Cursor, OverlayLayer};
+
+/// Radius of the gap left in the crosshair around the focus point, in points.
+const GAP: f32 = 7.0;
 
 /// What the texture on screen was built from; rebuilt when any part changes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct TexKey {
     generation: u64,
-    plane: Plane,
     index: usize,
     window: [u32; 2],
     left_is_left: bool,
+    /// The visible layers' ids and display keys, combined; 0 when no overlay
+    /// is drawn.
+    overlay: u64,
 }
 
-/// The state of one view card.
-pub struct ViewCard {
+/// What every card needs to draw, shared by the three planes.
+pub struct CardContext<'a> {
+    /// Colors.
+    pub theme: &'a Theme,
+    /// The displayed dataset.
+    pub ds: &'a Dataset,
+    /// Its displayed sub-brick.
+    pub frame: &'a [f32],
+    /// The gray window.
+    pub window: Window,
+    /// Bumped whenever the dataset changes (texture cache key).
+    pub generation: u64,
+    /// Layout, crosshair and orientation options.
+    pub options: ViewOptions,
+    /// The overlay layers to draw over the underlay, bottom first.
+    pub overlays: Vec<OverlayView<'a>>,
+    /// Dataset sub-bricks on the underlay grid that mask rules read.
+    pub sub_frames: &'a HashMap<(DatasetId, usize), Arc<Vec<f32>>>,
+}
+
+/// An overlay layer with its data on the underlay's grid.
+pub struct OverlayView<'a> {
+    /// What to draw and how.
+    pub layer: &'a OverlayLayer,
+    /// The OLay and Thr values on the underlay grid.
+    pub frames: &'a OverlayFrames,
+}
+
+/// A number that changes when any layer, its settings or the stacking order
+/// does (hidden layers included: others may read them); 0 when no layer is
+/// drawn.
+fn overlay_key(layers: &[OverlayView]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    if !layers.iter().any(|o| o.layer.visible) {
+        return 0;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for o in layers {
+        (o.layer.id, o.layer.display_key()).hash(&mut h);
+    }
+    h.finish() | 1
+}
+
+/// The colors of each visible layer for one slice of `plane`, in drawing
+/// order: filled layers bottom to top, then the outlines of boxed ("B")
+/// layers, so outlines are always on top.
+fn overlay_planes(
+    cx: &CardContext,
     plane: Plane,
-    /// Current voxel position `[i, j, k]` (the slice index is one of these).
-    ijk: [usize; 3],
-    /// User-set window, or `None` for automatic.
-    window: Option<Window>,
-    /// The displayed sub-brick and its automatic window, with the generation
-    /// they were made for. Reading a sub-brick converts every voxel, so this
-    /// must not happen per frame.
-    cache: Option<(u64, Arc<Vec<f32>>, Window)>,
+    index: usize,
+    left_is_left: bool,
+) -> Vec<Vec<Rgba>> {
+    let ds = cx.ds;
+    let map = PlaneMap::new(ds.dims, &ds.orient, plane, left_is_left);
+    let voxels: Vec<[usize; 3]> = (0..map.height)
+        .flat_map(|row| (0..map.width).map(move |col| (col, row)))
+        .map(|(col, row)| map.voxel(col, row, index))
+        .collect();
+    let inputs: Vec<LayerInput> = cx
+        .overlays
+        .iter()
+        .map(|o| LayerInput {
+            layer: o.layer,
+            frames: o.frames,
+        })
+        .collect();
+    let lookup = |d: DatasetId, s: usize| cx.sub_frames.get(&(d, s)).map(|f| f.as_slice());
+    let results = layers::evaluate(
+        &layers::Context {
+            under: ds,
+            layers: &inputs,
+            sub_frame: &lookup,
+            apply_keep: true,
+        },
+        &voxels,
+    );
+    let (mut filled, mut outlines) = (Vec::new(), Vec::new());
+    for (o, r) in cx.overlays.iter().zip(results) {
+        if !o.layer.visible {
+            continue;
+        }
+        let mut colors = r.colors;
+        if o.layer.boxed {
+            outline_only(&mut colors, &r.passed, map.width, map.height);
+            outlines.push(colors);
+        } else {
+            filled.push(colors);
+        }
+    }
+    filled.extend(outlines);
+    filled
+}
+
+/// The plane whose slice is the fixed one along `ras_axis` (what a crosshair
+/// line along that axis stands for in the other views).
+pub fn plane_fixed_on(ras_axis: usize) -> Plane {
+    match ras_axis {
+        0 => Plane::Sagittal,
+        1 => Plane::Coronal,
+        _ => Plane::Axial,
+    }
+}
+
+/// The plane's color: its slider and its crosshair line in the other views.
+pub fn plane_color(plane: Plane) -> Color32 {
+    match plane {
+        Plane::Axial => theme::AXIAL,
+        Plane::Coronal => theme::CORONAL,
+        Plane::Sagittal => theme::SAGITTAL,
+    }
+}
+
+/// One plane's view card.
+pub struct PlaneCard {
+    plane: Plane,
     texture: Option<(TexKey, TextureHandle)>,
 }
 
-impl Default for ViewCard {
-    fn default() -> Self {
+impl PlaneCard {
+    /// A card for `plane`.
+    pub fn new(plane: Plane) -> Self {
         Self {
-            plane: Plane::Axial,
-            ijk: [0; 3],
-            window: None,
-            cache: None,
+            plane,
             texture: None,
         }
     }
-}
 
-impl ViewCard {
-    /// Point the card at a new dataset: centered position, automatic window.
-    pub fn reset(&mut self, ds: &Dataset) {
-        self.ijk = ds.dims.map(|n| n / 2);
-        self.window = None;
-        self.cache = None;
+    /// Forget the texture (new dataset).
+    pub fn reset(&mut self) {
         self.texture = None;
     }
 
-    /// The index of the current slice along the plane's slice axis.
-    fn index(&self, ds: &Dataset) -> usize {
-        self.ijk[ds.orient.slice_axis(self.plane)]
-    }
+    /// Draw the card filling `ui`; clicking or dragging on the image moves
+    /// the crosshair.
+    pub fn ui(&mut self, ui: &mut Ui, cx: &CardContext, cur: &mut Cursor) {
+        let ds = cx.ds;
+        let left_is_left = cx.options.left_is_left;
+        let map = PlaneMap::new(ds.dims, &ds.orient, self.plane, left_is_left);
+        let index = cur.ijk[map.fixed_axis];
 
-    /// Move the slice by `delta`, clamped to the dataset.
-    pub fn step(&mut self, ds: &Dataset, delta: i32) {
-        let axis = ds.orient.slice_axis(self.plane);
-        let max = ds.dims[axis].saturating_sub(1);
-        self.ijk[axis] = self.ijk[axis]
-            .saturating_add_signed(delta as isize)
-            .min(max);
-    }
-
-    /// Page Up / Page Down change the slice.
-    pub fn handle_keys(&mut self, ctx: &egui::Context, ds: &Dataset) {
-        if ctx.egui_wants_keyboard_input() {
-            return;
-        }
-        let (up, down) = ctx.input(|i| (i.key_pressed(Key::PageUp), i.key_pressed(Key::PageDown)));
-        if up {
-            self.step(ds, 1);
-        }
-        if down {
-            self.step(ds, -1);
-        }
-    }
-
-    /// Draw the card filling `ui`.
-    pub fn ui(
-        &mut self,
-        ui: &mut Ui,
-        theme: &Theme,
-        ds: &Dataset,
-        generation: u64,
-        left_is_left: bool,
-    ) {
-        if !matches!(&self.cache, Some((g, ..)) if *g == generation) {
-            self.cache = ds.frame(0).map(|f| {
-                let w = Window::auto(&f);
-                (generation, Arc::new(f), w)
-            });
-        }
-        let Some((_, frame, auto)) = self.cache.clone() else {
-            ui.label(RichText::new("this dataset has no readable sub-brick").color(theme.error));
-            return;
-        };
-        let window = self.window.unwrap_or(auto);
-        let index = self.index(ds);
-
-        self.header(ui, theme, ds, index);
+        self.header(ui, cx, cur);
         ui.add_space(4.0);
 
-        let footer_h = 56.0;
         let avail = ui.available_size();
-        let (canvas, _) = ui.allocate_exact_size(
-            vec2(avail.x, (avail.y - footer_h).max(40.0)),
-            Sense::hover(),
-        );
-        ui.painter().rect_filled(canvas, 4.0, theme.canvas);
+        let canvas_size = vec2(avail.x, (avail.y - 30.0).max(40.0));
+        let (canvas, response) = ui.allocate_exact_size(canvas_size, Sense::click_and_drag());
+        ui.painter().rect_filled(canvas, 4.0, cx.theme.canvas);
+        if response.hovered() || response.dragged() {
+            cur.active = self.plane;
+        }
 
         if let Some(s) = slice::extract(
-            &frame,
+            cx.frame,
             ds.dims,
             ds.voxel_mm,
             &ds.orient,
@@ -130,58 +198,59 @@ impl ViewCard {
             left_is_left,
         ) {
             let key = TexKey {
-                generation,
-                plane: self.plane,
+                generation: cx.generation,
                 index,
-                window: [window.lo.to_bits(), window.hi.to_bits()],
+                window: [cx.window.lo.to_bits(), cx.window.hi.to_bits()],
                 left_is_left,
+                overlay: overlay_key(&cx.overlays),
             };
-            self.paint_slice(ui, theme, canvas, &s, window, key);
+            self.paint_slice(ui, cx, canvas, &response, &map, &s, key, cur);
         }
 
         ui.add_space(4.0);
-        self.footer(ui, theme, ds, auto);
+        self.footer(ui, cx, cur, &map);
     }
 
-    fn header(&mut self, ui: &mut Ui, theme: &Theme, ds: &Dataset, index: usize) {
+    fn header(&self, ui: &mut Ui, cx: &CardContext, cur: &Cursor) {
         ui.horizontal(|ui| {
-            for plane in Plane::ALL {
-                let selected = plane == self.plane;
-                // The default fonts have no "●", so paint the plane's dot.
-                let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
-                ui.painter()
-                    .circle_filled(dot.center(), 4.0, plane_color(plane));
-                if ui.selectable_label(selected, plane.name()).clicked() {
-                    self.plane = plane;
-                }
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new(slice_coordinate(ds, self.plane, self.ijk, index))
-                        .color(theme.text_dim)
-                        .monospace(),
-                );
-            });
+            let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
+            ui.painter()
+                .circle_filled(dot.center(), 4.0, plane_color(self.plane));
+            ui.label(
+                RichText::new(self.plane.name())
+                    .color(cx.theme.text)
+                    .strong(),
+            );
+            ui.label(
+                RichText::new(slice_coordinate(cx.ds, self.plane, cur.ijk))
+                    .color(cx.theme.text_dim)
+                    .monospace(),
+            );
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn paint_slice(
         &mut self,
         ui: &mut Ui,
-        theme: &Theme,
+        cx: &CardContext,
         canvas: Rect,
+        response: &egui::Response,
+        map: &PlaneMap,
         s: &Slice,
-        window: Window,
         key: TexKey,
+        cur: &mut Cursor,
     ) {
         // Upload only when something changed.
         let image = || {
-            ColorImage::from_rgba_unmultiplied([s.width, s.height], &compose::gray_rgba(s, window))
+            let layers = overlay_planes(cx, self.plane, key.index, key.left_is_left);
+            ColorImage::from_rgba_unmultiplied(
+                [s.width, s.height],
+                &compose::compose_rgba(s, cx.window, &layers),
+            )
         };
         match &mut self.texture {
-            Some((k, handle)) if *k == key => {
-                let _ = handle;
-            }
+            Some((k, _)) if *k == key => {}
             Some((k, handle)) => {
                 handle.set(image(), TextureOptions::NEAREST);
                 *k = key;
@@ -197,7 +266,7 @@ impl ViewCard {
             return;
         };
 
-        // Fit, preserving physical aspect: pixels per mm.
+        // Fit, preserving physical aspect: points per mm.
         let mm = vec2(
             (s.width as f64 * s.pixel_mm[0]) as f32,
             (s.height as f64 * s.pixel_mm[1]) as f32,
@@ -209,6 +278,18 @@ impl ViewCard {
             return;
         }
         let rect = Rect::from_center_size(canvas.center(), mm * fit);
+
+        // Click or drag: move the crosshair to the voxel under the pointer.
+        if let Some(p) = response
+            .interact_pointer_pos()
+            .filter(|_| response.clicked() || response.dragged())
+        {
+            let col = pixel_at(p.x, rect.left(), rect.width(), s.width);
+            let row = pixel_at(p.y, rect.top(), rect.height(), s.height);
+            cur.ijk = map.voxel(col, row, cur.ijk[map.fixed_axis]);
+            cur.active = self.plane;
+        }
+
         let painter = ui.painter_at(canvas);
         painter.image(
             texture.id(),
@@ -217,8 +298,8 @@ impl ViewCard {
             Color32::WHITE,
         );
 
-        // Orientation letters and scale bar contrast with the canvas.
-        let ink = if theme.canvas.r() > 128 {
+        // Letters, scale bar and crosshair ring contrast with the canvas.
+        let ink = if cx.theme.canvas.r() > 128 {
             Color32::from_gray(60)
         } else {
             Color32::from_gray(200)
@@ -250,78 +331,105 @@ impl ViewCard {
             pos2(c.x, rect.bottom() + 4.0),
             Align2::CENTER_TOP,
             s.bottom,
-            font.clone(),
+            font,
             ink,
         );
         scale_bar(&painter, canvas, fit, ink);
+        painter.text(
+            pos2(canvas.right() - 8.0, canvas.bottom() - 8.0),
+            Align2::RIGHT_BOTTOM,
+            format!("{:.0}%", fit as f64 * s.pixel_mm[0] * 100.0),
+            FontId::proportional(11.0),
+            ink,
+        );
+
+        if cx.options.crosshair {
+            self.crosshair(&painter, rect, cx, map, s, cur, ink);
+        }
     }
 
-    fn footer(&mut self, ui: &mut Ui, theme: &Theme, ds: &Dataset, auto: Window) {
-        let axis = ds.orient.slice_axis(self.plane);
-        let max = ds.dims[axis].saturating_sub(1);
+    /// The other two planes' positions as colored lines with a gap at the
+    /// focus point.
+    #[allow(clippy::too_many_arguments)]
+    fn crosshair(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        cx: &CardContext,
+        map: &PlaneMap,
+        s: &Slice,
+        cur: &Cursor,
+        ink: Color32,
+    ) {
+        let (col, row) = map.pixel(cur.ijk);
+        let focus = pos2(
+            rect.left() + (col as f32 + 0.5) / s.width as f32 * rect.width(),
+            rect.top() + (row as f32 + 0.5) / s.height as f32 * rect.height(),
+        );
+        let (h, v) = self.plane.screen_axes(cx.options.left_is_left);
+        // The vertical line marks position along the horizontal axis, so it
+        // stands for the plane that is fixed on that axis, and vice versa.
+        let vertical = Stroke::new(1.0, plane_color(plane_fixed_on(h.ras_axis)));
+        let horizontal = Stroke::new(1.0, plane_color(plane_fixed_on(v.ras_axis)));
+        painter.line_segment(
+            [pos2(focus.x, rect.top()), pos2(focus.x, focus.y - GAP)],
+            vertical,
+        );
+        painter.line_segment(
+            [pos2(focus.x, focus.y + GAP), pos2(focus.x, rect.bottom())],
+            vertical,
+        );
+        painter.line_segment(
+            [pos2(rect.left(), focus.y), pos2(focus.x - GAP, focus.y)],
+            horizontal,
+        );
+        painter.line_segment(
+            [pos2(focus.x + GAP, focus.y), pos2(rect.right(), focus.y)],
+            horizontal,
+        );
+        painter.circle_stroke(focus, 2.5, Stroke::new(1.0, ink));
+    }
+
+    fn footer(&mut self, ui: &mut Ui, cx: &CardContext, cur: &mut Cursor, map: &PlaneMap) {
+        let axis = map.fixed_axis;
+        let max = cx.ds.dims[axis].saturating_sub(1);
         ui.horizontal(|ui| {
-            let mut idx = self.ijk[axis];
+            let mut idx = cur.ijk[axis];
             ui.spacing_mut().slider_width = (ui.available_width() - 90.0).max(60.0);
-            if ui
-                .add(egui::Slider::new(&mut idx, 0..=max).show_value(false))
-                .changed()
-            {
-                self.ijk[axis] = idx;
+            let changed = ui
+                .scope(|ui| {
+                    // The slider's filled part takes the plane's color.
+                    ui.visuals_mut().selection.bg_fill = plane_color(self.plane);
+                    ui.add(egui::Slider::new(&mut idx, 0..=max).show_value(false))
+                        .changed()
+                })
+                .inner;
+            if changed {
+                cur.ijk[axis] = idx;
+                cur.active = self.plane;
             }
             ui.label(
                 RichText::new(format!("{idx} / {max}"))
-                    .color(theme.text_dim)
+                    .color(cx.theme.text_dim)
                     .monospace(),
             );
         });
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("window").color(theme.text_dim));
-            let mut w = self.window.unwrap_or(auto);
-            let before = w;
-            // Enough decimals to tell values apart across the data range.
-            let range = (auto.hi - auto.lo).max(1e-6);
-            let decimals = (2.0 - range.log10().floor()).clamp(0.0, 6.0) as usize;
-            let speed = range / 200.0;
-            for v in [&mut w.lo, &mut w.hi] {
-                ui.add(egui::DragValue::new(v).speed(speed).max_decimals(decimals));
-            }
-            if w != before {
-                self.window = Some(w);
-            }
-            if ui
-                .add_enabled(self.window.is_some(), egui::Button::new("Auto"))
-                .clicked()
-            {
-                self.window = None;
-            }
-        });
     }
 }
 
-fn plane_color(plane: Plane) -> Color32 {
-    match plane {
-        Plane::Axial => theme::AXIAL,
-        Plane::Coronal => theme::CORONAL,
-        Plane::Sagittal => theme::SAGITTAL,
-    }
+/// The pixel index under screen coordinate `p`, clamped to the image.
+fn pixel_at(p: f32, start: f32, extent: f32, pixels: usize) -> usize {
+    let f = ((p - start) / extent * pixels as f32).floor();
+    (f.max(0.0) as usize).min(pixels.saturating_sub(1))
 }
 
-/// Header text for the slice: the plane's world coordinate in mm with an
-/// anatomical letter, e.g. `z = 12.0 S`, and the voxel index.
-fn slice_coordinate(ds: &Dataset, plane: Plane, ijk: [usize; 3], index: usize) -> String {
-    let mut p = ijk;
-    p[ds.orient.slice_axis(plane)] = index;
-    let ras = afni_io::geometry::transform_point(&ds.ijk_to_ras, p.map(|v| v as f64));
+/// Header text for the slice: its world position along the fixed axis with a
+/// letter, e.g. `z = 12.0 mm S`.
+fn slice_coordinate(ds: &Dataset, plane: Plane, ijk: [usize; 3]) -> String {
+    let ras = ijk_to_ras(&ds.ijk_to_ras, ijk);
     let axis = plane.fixed_ras_axis();
-    let v = ras[axis];
-    // `-0.0` would print as "-0.0".
-    let shown = if v.abs() < 0.05 { 0.0 } else { v.abs() };
-    format!(
-        "{} = {:.1} {}",
-        ["x", "y", "z"][axis],
-        shown,
-        letter(axis, v >= 0.0)
-    )
+    let (mag, letter) = magnitude_and_letter(ras)[axis];
+    format!("{} = {:.1} mm {}", ["x", "y", "z"][axis], mag, letter)
 }
 
 /// A scale bar of a round length (1, 2, 5 × 10ⁿ mm) near 80 px wide, bottom
@@ -371,81 +479,165 @@ mod tests {
     }
 
     #[test]
-    fn step_clamps_and_reset_centers() {
-        let ds = synthetic::phantom();
-        let mut v = ViewCard::default();
-        v.reset(&ds);
-        assert_eq!(v.index(&ds), 75); // nz = 150
-        v.step(&ds, -1000);
-        assert_eq!(v.index(&ds), 0);
-        v.step(&ds, 1000);
-        assert_eq!(v.index(&ds), 149);
+    fn pixel_at_clamps_to_image() {
+        assert_eq!(pixel_at(50.0, 0.0, 100.0, 10), 5);
+        assert_eq!(pixel_at(-20.0, 0.0, 100.0, 10), 0);
+        assert_eq!(pixel_at(500.0, 0.0, 100.0, 10), 9);
+    }
+
+    #[test]
+    fn crosshair_lines_stand_for_the_other_planes() {
+        // In an axial card the vertical line is a sagittal position and the
+        // horizontal line a coronal one.
+        let (h, v) = Plane::Axial.screen_axes(false);
+        assert_eq!(plane_fixed_on(h.ras_axis), Plane::Sagittal);
+        assert_eq!(plane_fixed_on(v.ras_axis), Plane::Coronal);
+        let (h, v) = Plane::Coronal.screen_axes(false);
+        assert_eq!(plane_fixed_on(h.ras_axis), Plane::Sagittal);
+        assert_eq!(plane_fixed_on(v.ras_axis), Plane::Axial);
+        let (h, v) = Plane::Sagittal.screen_axes(false);
+        assert_eq!(plane_fixed_on(h.ras_axis), Plane::Coronal);
+        assert_eq!(plane_fixed_on(v.ras_axis), Plane::Axial);
     }
 
     #[test]
     fn slice_coordinate_has_letters() {
         let ds = synthetic::phantom();
-        // Phantom: z = -75 at k = 0 (I), +1 mm per slice.
+        // Phantom: z = -75 at k = 0 (I), +1 mm per slice; x = +75 at i = 0 (R).
         assert_eq!(
-            slice_coordinate(&ds, Plane::Axial, [0, 0, 0], 0),
-            "z = 75.0 I"
+            slice_coordinate(&ds, Plane::Axial, [0, 0, 0]),
+            "z = 75.0 mm I"
         );
         assert_eq!(
-            slice_coordinate(&ds, Plane::Axial, [0, 0, 0], 75),
-            "z = 0.0 S"
+            slice_coordinate(&ds, Plane::Axial, [0, 0, 75]),
+            "z = 0.0 mm S"
         );
         assert_eq!(
-            slice_coordinate(&ds, Plane::Axial, [0, 0, 0], 85),
-            "z = 10.0 S"
+            slice_coordinate(&ds, Plane::Axial, [0, 0, 85]),
+            "z = 10.0 mm S"
+        );
+        assert_eq!(
+            slice_coordinate(&ds, Plane::Sagittal, [0, 0, 0]),
+            "x = 75.0 mm R"
         );
     }
-}
 
-#[cfg(test)]
-mod render_tests {
-    use super::*;
-    use crate::data::synthetic;
-    use crate::prefs::{CanvasBackground, Prefs, ThemeChoice};
+    // ---- Overlay stacking ----
 
-    fn render(plane: Plane, theme_choice: ThemeChoice, canvas: CanvasBackground, name: &str) {
-        let ds = synthetic::phantom();
-        let prefs = Prefs {
-            theme: theme_choice,
-            canvas,
-            ..Prefs::default()
+    use std::sync::Arc;
+
+    use afni_core::afni_colors::AfniColorScale;
+
+    use crate::session::LayerId;
+    use crate::session::store::DatasetId;
+
+    fn layer(id: u64, opacity: f32) -> OverlayLayer {
+        let mut l = OverlayLayer::new(DatasetId(1), AfniColorScale::RedsAndBlues);
+        l.id = LayerId(id);
+        l.threshold = 1.0;
+        l.opacity = opacity;
+        l
+    }
+
+    /// Frames that are 5 everywhere (so everything passes) or 5 on the first
+    /// slab of x and 0 elsewhere (so a region has an edge).
+    fn frames(ds: &Dataset, slab: bool) -> OverlayFrames {
+        let [nx, ny, nz] = ds.dims;
+        let v: Vec<f32> = (0..nx * ny * nz)
+            .map(|n| if !slab || n % nx < nx / 2 { 5.0 } else { 0.0 })
+            .collect();
+        let v = Arc::new(v);
+        OverlayFrames {
+            olay: v.clone(),
+            thr: v,
+            auto_range: 5.0,
+            thr_max: 5.0,
+            keep: None,
+        }
+    }
+
+    #[test]
+    fn overlay_planes_are_bottom_to_top_with_outlines_last_and_hidden_layers_skipped() {
+        let ds = crate::data::synthetic::phantom();
+        let theme = Theme::dark();
+        let (fa, fb, fc, fd) = (
+            frames(&ds, false),
+            frames(&ds, true),
+            frames(&ds, false),
+            frames(&ds, false),
+        );
+        let (a, mut b, mut c, d) = (layer(1, 0.2), layer(2, 1.0), layer(3, 0.9), layer(4, 0.4));
+        b.boxed = true;
+        c.visible = false;
+        let cx = CardContext {
+            theme: &theme,
+            ds: &ds,
+            frame: &[],
+            window: Window { lo: 0.0, hi: 1.0 },
+            generation: 1,
+            options: ViewOptions {
+                layout: Default::default(),
+                crosshair: false,
+                left_is_left: false,
+            },
+            sub_frames: &HashMap::new(),
+            overlays: vec![
+                OverlayView {
+                    layer: &a,
+                    frames: &fa,
+                },
+                OverlayView {
+                    layer: &b,
+                    frames: &fb,
+                },
+                OverlayView {
+                    layer: &c,
+                    frames: &fc,
+                },
+                OverlayView {
+                    layer: &d,
+                    frames: &fd,
+                },
+            ],
         };
-        let theme = Theme::resolve(&prefs, true);
-        let mut card = ViewCard::default();
-        card.reset(&ds);
-        card.plane = plane;
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(vec2(520.0, 560.0))
-            .build_ui(move |ui| {
-                theme.apply(ui.ctx());
-                ui.painter().rect_filled(ui.max_rect(), 0.0, theme.panel);
-                card.ui(ui, &theme, &ds, 1, false);
-            });
-        harness.run();
-        harness.snapshot(name);
-    }
-
-    #[test]
-    fn view_card_axial_dark() {
-        render(
-            Plane::Axial,
-            ThemeChoice::Dark,
-            CanvasBackground::Black,
-            "view_card_axial_dark",
+        let planes = overlay_planes(&cx, Plane::Axial, 75, false);
+        // Fills bottom to top (a, then d; c is hidden), then b's outline.
+        assert_eq!(planes.len(), 3);
+        assert!((planes[0][0].a - 0.2).abs() < 1e-6);
+        assert!((planes[1][0].a - 0.4).abs() < 1e-6);
+        assert!(planes[2].iter().any(|c| c.a > 0.0) && planes[2].iter().any(|c| c.a == 0.0));
+        // The cache key sees order, visibility and settings.
+        let key = overlay_key(&cx.overlays);
+        assert_ne!(key, 0);
+        let mut reordered = vec![
+            OverlayView {
+                layer: &d,
+                frames: &fd,
+            },
+            OverlayView {
+                layer: &a,
+                frames: &fa,
+            },
+        ];
+        assert_ne!(
+            overlay_key(&reordered),
+            overlay_key(&[
+                OverlayView {
+                    layer: &a,
+                    frames: &fa
+                },
+                OverlayView {
+                    layer: &d,
+                    frames: &fd
+                }
+            ])
         );
-    }
-
-    #[test]
-    fn view_card_sagittal_light_white_canvas() {
-        render(
-            Plane::Sagittal,
-            ThemeChoice::Light,
-            CanvasBackground::White,
-            "view_card_sagittal_light_white",
-        );
+        reordered.clear();
+        assert_eq!(overlay_key(&reordered), 0);
+        let only_hidden = [OverlayView {
+            layer: &c,
+            frames: &fc,
+        }];
+        assert_eq!(overlay_key(&only_hidden), 0);
     }
 }

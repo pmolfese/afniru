@@ -1,5 +1,8 @@
 //! Window/level and grayscale compositing.
 
+use afni_core::color::Rgba;
+use afni_core::composite::{Layer, composite_layers};
+
 use super::slice::Slice;
 
 /// A display window: values at or below `lo` are black, at or above `hi`
@@ -52,16 +55,35 @@ fn percentile(v: &mut [f32], p: f32) -> f32 {
     *v.select_nth_unstable_by(idx, f32::total_cmp).1
 }
 
-/// The slice as opaque RGBA bytes, gray through `window`.
-pub fn gray_rgba(slice: &Slice, window: Window) -> Vec<u8> {
+/// The slice as opaque colors, gray through `window`.
+pub fn underlay_colors(slice: &Slice, window: Window) -> Vec<Rgba> {
     slice
         .data
         .iter()
-        .flat_map(|&x| {
-            let g = window.gray(x);
-            [g, g, g, 255]
+        .map(|&x| {
+            let g = f32::from(window.gray(x)) / 255.0;
+            Rgba {
+                r: g,
+                g,
+                b: g,
+                a: 1.0,
+            }
         })
         .collect()
+}
+
+/// The slice as RGBA bytes: gray through `window`, with each of `layers`
+/// (one color per pixel, straight alpha) composited over it, first layer
+/// first. A layer whose length does not match the slice is skipped.
+pub fn compose_rgba(slice: &Slice, window: Window, layers: &[Vec<Rgba>]) -> Vec<u8> {
+    let under = underlay_colors(slice, window);
+    let planes: Vec<Layer> = layers
+        .iter()
+        .filter(|l| l.len() == under.len())
+        .map(|l| Layer::new(l))
+        .collect();
+    let colors = composite_layers(&under, &planes).unwrap_or(under);
+    colors.iter().flat_map(|c| c.to_u8()).collect()
 }
 
 #[cfg(test)]
@@ -101,9 +123,8 @@ mod tests {
         assert_eq!(w.gray(f32::NAN), 0);
     }
 
-    #[test]
-    fn rgba_is_opaque_gray() {
-        let s = Slice {
+    fn two_pixels() -> Slice {
+        Slice {
             width: 2,
             height: 1,
             data: vec![0.0, 1.0],
@@ -112,10 +133,102 @@ mod tests {
             right: 'L',
             top: 'A',
             bottom: 'P',
-        };
+        }
+    }
+
+    #[test]
+    fn rgba_is_opaque_gray_without_layers() {
         assert_eq!(
-            gray_rgba(&s, Window { lo: 0.0, hi: 1.0 }),
+            compose_rgba(&two_pixels(), Window { lo: 0.0, hi: 1.0 }, &[]),
             [0, 0, 0, 255, 255, 255, 255, 255]
+        );
+    }
+
+    #[test]
+    fn an_opaque_layer_replaces_the_pixel_and_a_transparent_one_leaves_it() {
+        let red = Rgba {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let layer = vec![Rgba::TRANSPARENT, red];
+        assert_eq!(
+            compose_rgba(&two_pixels(), Window { lo: 0.0, hi: 1.0 }, &[layer]),
+            [0, 0, 0, 255, 255, 0, 0, 255]
+        );
+    }
+
+    #[test]
+    fn a_half_transparent_layer_blends_with_the_gray() {
+        let red = Rgba {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.5,
+        };
+        let out = compose_rgba(
+            &two_pixels(),
+            Window { lo: 0.0, hi: 1.0 },
+            &[vec![red, red]],
+        );
+        // Over black: (127/128, 0, 0); over white: (255, 128, 128).
+        assert_eq!(out[3], 255);
+        assert!((127..=128).contains(&out[0]) && out[1] == 0, "{out:?}");
+        assert!(out[4] == 255 && (127..=128).contains(&out[5]), "{out:?}");
+    }
+
+    #[test]
+    fn a_layer_of_the_wrong_size_is_ignored() {
+        let out = compose_rgba(
+            &two_pixels(),
+            Window { lo: 0.0, hi: 1.0 },
+            &[vec![Rgba::WHITE]],
+        );
+        assert_eq!(out, [0, 0, 0, 255, 255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn layers_composite_bottom_to_top_so_order_and_opacity_matter() {
+        let one = Slice {
+            width: 1,
+            height: 1,
+            data: vec![0.0],
+            pixel_mm: [1.0; 2],
+            left: 'R',
+            right: 'L',
+            top: 'A',
+            bottom: 'P',
+        };
+        let w = Window { lo: 0.0, hi: 1.0 };
+        let red = Rgba {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let blue_quarter = Rgba {
+            r: 0.0,
+            g: 0.0,
+            b: 1.0,
+            a: 0.25,
+        };
+        let blue = Rgba {
+            b: 1.0,
+            r: 0.0,
+            g: 0.0,
+            a: 1.0,
+        };
+        let red_quarter = Rgba { a: 0.25, ..red };
+        // Blue at 25% over red: mostly red.
+        assert_eq!(
+            compose_rgba(&one, w, &[vec![red], vec![blue_quarter]]),
+            [191, 0, 64, 255]
+        );
+        // The other way round: mostly blue.
+        assert_eq!(
+            compose_rgba(&one, w, &[vec![blue], vec![red_quarter]]),
+            [64, 0, 191, 255]
         );
     }
 }

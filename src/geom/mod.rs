@@ -5,6 +5,8 @@
 //! Anterior, z toward Superior), as `afni-io` reports them. Slices are shown
 //! on the dataset's own voxel grid (no rotation or resampling), as AFNI does.
 
+pub mod coords;
 pub mod orient;
 
+pub use coords::CoordOrient;
 pub use orient::{GridOrient, Plane, letter};

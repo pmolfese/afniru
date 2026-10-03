@@ -7,6 +7,8 @@
 //! Physical coordinates passed to the tissue function are (lr, ap, is) in mm,
 //! with +lr = Left, +ap = Anterior, +is = Superior.
 
+use afni_core::stat::{StatKind, StatSpec};
+
 use super::Dataset;
 
 /// Grid size in x.
@@ -20,22 +22,44 @@ struct Vol {
     data: Vec<f32>,
 }
 
-impl Vol {
-    #[inline]
-    fn at(&self, i: usize, j: usize, k: usize) -> f32 {
-        self.data[i + NX * (j + NY * k)]
-    }
-}
+impl Vol {}
 
 /// The phantom anatomy as a one-sub-brick dataset, 1 mm voxels.
 pub fn phantom() -> Dataset {
     Dataset::synthetic("phantom", vec![build_anat().data], vec!["anat".into()])
 }
 
+/// A second dataset on the phantom's grid, for tests that switch underlay.
+#[cfg(test)]
+pub fn tmap_for_tests() -> Dataset {
+    tmap()
+}
+
+/// A second t-map on the phantom's grid, mirrored left-right, so a stack of
+/// two layers shows two different pictures.
+#[cfg(test)]
+pub fn mirrored_tmap() -> Dataset {
+    let mut d = tmap();
+    d.name = "tmap_mirror".into();
+    if let super::Data::Synthetic(frames) = &mut d.data {
+        for f in frames.iter_mut() {
+            for k in 0..NZ {
+                for j in 0..NY {
+                    let row = &mut f[NX * (j + NY * k)..NX * (j + NY * k) + NX];
+                    row.reverse();
+                }
+            }
+        }
+    }
+    d
+}
+
 /// A fake t-statistic map on the phantom's grid.
 pub fn tmap() -> Dataset {
     let t = build_tstat(&build_anat());
-    Dataset::synthetic("tmap", vec![t.data], vec!["task#0_Tstat".into()])
+    let mut d = Dataset::synthetic("tmap", vec![t.data], vec!["task#0_Tstat".into()]);
+    d.stats = vec![Some(StatSpec::new(StatKind::Ttest, &[118.0], 0.0))];
+    d
 }
 
 /// voxel index -> (lr, ap, is) mm
