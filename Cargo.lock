@@ -159,6 +159,7 @@ dependencies = [
 name = "afniru"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "afni-core",
  "afni-io",
  "anyhow",
@@ -169,6 +170,7 @@ dependencies = [
  "egui_kittest",
  "egui_plot",
  "glam",
+ "image",
  "rfd",
  "serde",
 ]

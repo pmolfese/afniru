@@ -52,9 +52,33 @@ pub struct GraphEvents {
     pub move_to: Option<[usize; 3]>,
 }
 
-const DATA: Color32 = Color32::from_rgb(235, 235, 240);
-const FIT: Color32 = Color32::from_rgb(242, 140, 72);
-const MARKER: Color32 = Color32::from_rgb(250, 204, 21);
+/// The colors of the traces, chosen for the theme: the data in the text
+/// color (dark on the light theme, light on the dark one), the fit in orange
+/// and the time marker in gold, each darker on a light background.
+struct Ink {
+    data: Color32,
+    fit: Color32,
+    marker: Color32,
+    stimulus: Color32,
+}
+
+fn ink(theme: &Theme) -> Ink {
+    if theme.dark {
+        Ink {
+            data: Color32::from_rgb(235, 235, 240),
+            fit: Color32::from_rgb(242, 140, 72),
+            marker: Color32::from_rgb(250, 204, 21),
+            stimulus: Color32::from_rgba_unmultiplied(250, 204, 21, 36),
+        }
+    } else {
+        Ink {
+            data: Color32::from_rgb(25, 28, 36),
+            fit: Color32::from_rgb(214, 88, 8),
+            marker: Color32::from_rgb(180, 120, 0),
+            stimulus: Color32::from_rgba_unmultiplied(235, 170, 0, 56),
+        }
+    }
+}
 
 /// The voxel of `to` that covers the center of voxel `ijk` of `from`.
 fn map_voxel(from: &Dataset, to: &Dataset, ijk: [usize; 3]) -> Option<[usize; 3]> {
@@ -236,7 +260,7 @@ fn stimulus(plot_ui: &mut egui_plot::PlotUi, input: &GraphInput, lo: f64, hi: f6
                 "stimulus",
                 PlotPoints::new(vec![[x0, lo], [x1, lo], [x1, hi], [x0, hi]]),
             )
-            .fill_color(Color32::from_rgba_unmultiplied(250, 204, 21, 36))
+            .fill_color(ink(input.theme).stimulus)
             .stroke(Stroke::NONE),
         );
     }
@@ -290,18 +314,22 @@ fn big_plot(
             stimulus(plot_ui, input, lo, hi);
             plot_ui.line(
                 Line::new("series", points(cell.first, &cell.values))
-                    .color(DATA)
-                    .width(1.3),
+                    .color(ink(input.theme).data)
+                    .width(1.6),
             );
             if let Some(fit) = &cell.fit {
                 plot_ui.line(
                     Line::new("fit", points(cell.first, fit))
-                        .color(FIT)
+                        .color(ink(input.theme).fit)
                         .width(1.8),
                 );
             }
             if let Some(tr) = marker {
-                plot_ui.vline(VLine::new("TR", tr).color(MARKER).width(1.2));
+                plot_ui.vline(
+                    VLine::new("TR", tr)
+                        .color(ink(input.theme).marker)
+                        .width(1.2),
+                );
             }
             let r = plot_ui.response();
             if (r.clicked() || r.dragged())
@@ -356,18 +384,22 @@ fn small_plot(
             stimulus(plot_ui, input, lo, hi);
             plot_ui.line(
                 Line::new("series", points(cell.first, &cell.values))
-                    .color(DATA)
+                    .color(ink(input.theme).data)
                     .width(1.0),
             );
             if let Some(fit) = &cell.fit {
                 plot_ui.line(
                     Line::new("fit", points(cell.first, fit))
-                        .color(FIT)
+                        .color(ink(input.theme).fit)
                         .width(1.2),
                 );
             }
             if let Some(tr) = marker {
-                plot_ui.vline(VLine::new("TR", tr).color(MARKER).width(1.0));
+                plot_ui.vline(
+                    VLine::new("TR", tr)
+                        .color(ink(input.theme).marker)
+                        .width(1.0),
+                );
             }
         });
     response.response.clicked()

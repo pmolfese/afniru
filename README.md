@@ -40,6 +40,25 @@ each reads.
 
 Click or drag in a view to move the crosshair; arrow keys move it one voxel in the view under the mouse; Page Up/Down change that view's slice. The toolbar switches layouts (1×3, 3×1, 2×2), swaps radiological/neurological, and hides the crosshair lines.
 
+## Slice numbers and saving images
+
+Right-click an image for its menu. **Slice number** draws the slice number on
+all three views; **Number position** (the four corners) and **Number size**
+(small to extra large) set where and how big, and also turn it on. (To start
+that way, set `AFNIRU_SLICE_NUMBER`, `AFNIRU_SLICE_NUMBER_CORNER` and
+`AFNIRU_SLICE_NUMBER_SIZE` in `~/.afniru`.)
+
+The same menu saves PNG files: **Save this slice…**, **Save the three views**
+(one row, one column, a 2×2 grid, or three separate files), and **Montage and
+more options…**, a dialog for a montage of slices of one plane (rows, columns,
+first and last slice, step, with a "fit" button) and for the look of the files:
+the size (pixels per voxel, ×1 to ×8; voxels are always square blocks, never
+smoothed), orientation letters, the slice number, and the crosshair. Pictures
+use the underlay window, every visible overlay layer, and the radiological or
+neurological display you are using; the background follows
+`AFNIRU_CANVAS_BACKGROUND` (white for publication figures). The Graph is not
+saved: the 2×2 grid leaves its cell empty.
+
 ## The overlay
 
 Every dataset after the first on the command line is drawn in color over the

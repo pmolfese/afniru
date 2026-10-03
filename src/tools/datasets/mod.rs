@@ -7,8 +7,11 @@ use egui_phosphor::regular as icon;
 use super::{Instance, Tool, ToolContext};
 use crate::data::Source;
 use crate::session::action::LoadRole;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use crate::data::Dataset;
+use crate::recent::RecentKind;
+use crate::session::series::SeriesChange;
 use crate::session::{Action, DatasetId, LayerId, OverlayChange};
 
 /// The Datasets tool. Pinned: it is always in the card stack.
@@ -32,12 +35,16 @@ impl Tool for DatasetsTool {
             } else {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("ULay").color(theme.text_dim));
-                    ComboBox::from_id_salt("ulay")
-                        .width(ui.available_width())
-                        .selected_text("choose a dataset")
-                        .show_ui(ui, |ui| {
-                            dataset_items(ui, cx, None, &Picks::underlay(), &mut actions);
-                        });
+                    dataset_combo(
+                        ui,
+                        cx,
+                        "ulay",
+                        ui.available_width(),
+                        "choose a dataset",
+                        None,
+                        &Picks::underlay(),
+                        &mut actions,
+                    );
                 });
             }
             actions.extend(folder_rows(ui, cx));
@@ -49,12 +56,16 @@ impl Tool for DatasetsTool {
             .show(ui, |ui| {
                 ui.label(RichText::new("ULay").color(theme.text_dim));
                 let current = cx.controller.underlay;
-                ComboBox::from_id_salt("ulay")
-                    .width(ui.available_width())
-                    .selected_text(&ds.name)
-                    .show_ui(ui, |ui| {
-                        dataset_items(ui, cx, current, &Picks::underlay(), &mut actions);
-                    });
+                dataset_combo(
+                    ui,
+                    cx,
+                    "ulay",
+                    ui.available_width(),
+                    &ds.name,
+                    current,
+                    &Picks::underlay(),
+                    &mut actions,
+                );
                 ui.end_row();
 
                 ui.label(RichText::new("Sub-brick").color(theme.text_dim));
@@ -104,6 +115,8 @@ fn loading_rows(ui: &mut Ui, cx: &ToolContext) -> Vec<Action> {
                 LoadRole::Underlay => "ULay".to_string(),
                 LoadRole::Overlay => "Overlay".to_string(),
                 LoadRole::Layer(l) => format!("Overlay {}", l.0),
+                LoadRole::GraphSource => "Graph".to_string(),
+                LoadRole::GraphFit => "Graph fit".to_string(),
             };
             let text = if l.waiting {
                 format!("{what} {} · read, waiting for the one before", l.name)
@@ -131,38 +144,105 @@ fn loading_rows(ui: &mut Ui, cx: &ToolContext) -> Vec<Action> {
     actions
 }
 
+/// Which loaded datasets a picker offers.
+type DatasetFilter = Box<dyn Fn(&Dataset) -> bool>;
+
+/// An item before the datasets in a picker ("none", "the underlay").
+pub(crate) struct Leading {
+    /// Its text.
+    pub label: String,
+    /// Is it the current choice?
+    pub selected: bool,
+    /// What choosing it does.
+    pub action: Action,
+}
+
 /// What choosing a dataset in a picker does: for one already loaded, and for
-/// one only listed in a folder (which is read from disk then).
+/// one only listed in a folder or remembered (which is read from disk then).
 pub(crate) struct Picks {
     loaded: Box<dyn Fn(DatasetId) -> Action>,
     from_folder: Box<dyn Fn(&Path) -> Action>,
+    /// Which recent list the picker shows.
+    recent: RecentKind,
+    /// Which loaded datasets are offered (all, if `None`).
+    only: Option<DatasetFilter>,
+    /// Items before the datasets.
+    leading: Vec<Leading>,
 }
 
 impl Picks {
+    fn new(
+        loaded: impl Fn(DatasetId) -> Action + 'static,
+        from_folder: impl Fn(&Path) -> Action + 'static,
+        recent: RecentKind,
+    ) -> Self {
+        Self {
+            loaded: Box::new(loaded),
+            from_folder: Box::new(from_folder),
+            recent,
+            only: None,
+            leading: Vec::new(),
+        }
+    }
+
     /// Make the dataset the underlay.
     pub(crate) fn underlay() -> Self {
-        Self {
-            loaded: Box::new(Action::SetUnderlay),
-            from_folder: Box::new(|p| Action::LoadDataset(p.to_path_buf(), LoadRole::Underlay)),
-        }
+        Self::new(
+            Action::SetUnderlay,
+            |p| Action::LoadDataset(p.to_path_buf(), LoadRole::Underlay),
+            RecentKind::Underlay,
+        )
     }
 
     /// Add the dataset as a new overlay layer.
     pub(crate) fn new_overlay() -> Self {
-        Self {
-            loaded: Box::new(Action::AddOverlay),
-            from_folder: Box::new(|p| Action::LoadDataset(p.to_path_buf(), LoadRole::Overlay)),
-        }
+        Self::new(
+            Action::AddOverlay,
+            |p| Action::LoadDataset(p.to_path_buf(), LoadRole::Overlay),
+            RecentKind::Overlay,
+        )
     }
 
     /// Make the dataset the one drawn by an existing layer.
     pub(crate) fn layer(layer: LayerId) -> Self {
-        Self {
-            loaded: Box::new(move |id| Action::Layer(layer, OverlayChange::Dataset(id))),
-            from_folder: Box::new(move |p| {
-                Action::LoadDataset(p.to_path_buf(), LoadRole::Layer(layer))
-            }),
-        }
+        Self::new(
+            move |id| Action::Layer(layer, OverlayChange::Dataset(id)),
+            move |p| Action::LoadDataset(p.to_path_buf(), LoadRole::Layer(layer)),
+            RecentKind::Overlay,
+        )
+    }
+
+    /// The dataset the Graph plots: any dataset with several time points, or
+    /// the underlay (`source` is the current choice).
+    pub(crate) fn graph_source(source: Option<DatasetId>) -> Self {
+        let mut p = Self::new(
+            |id| Action::Series(SeriesChange::Source(Some(id))),
+            |p| Action::LoadDataset(p.to_path_buf(), LoadRole::GraphSource),
+            RecentKind::Graph,
+        );
+        p.only = Some(Box::new(|d| d.nvols > 1));
+        p.leading.push(Leading {
+            label: "ULay (the underlay)".into(),
+            selected: source.is_none(),
+            action: Action::Series(SeriesChange::Source(None)),
+        });
+        p
+    }
+
+    /// The Graph's fit: any dataset with `len` time points, or none.
+    pub(crate) fn graph_fit(len: usize, fit: Option<DatasetId>) -> Self {
+        let mut p = Self::new(
+            |id| Action::Series(SeriesChange::Fit(Some(id))),
+            |p| Action::LoadDataset(p.to_path_buf(), LoadRole::GraphFit),
+            RecentKind::Graph,
+        );
+        p.only = Some(Box::new(move |d| len > 1 && d.nvols == len));
+        p.leading.push(Leading {
+            label: "none".into(),
+            selected: fit.is_none(),
+            action: Action::Series(SeriesChange::Fit(None)),
+        });
+        p
     }
 }
 
@@ -174,9 +254,48 @@ fn is_loaded(cx: &ToolContext, path: &Path) -> bool {
     )
 }
 
-/// The items of a dataset picker (inside a combo box or menu): the datasets
-/// already loaded, then, per folder, the ones not loaded yet (they are read
-/// when chosen). A filter box appears when the list is long.
+/// A combo box that picks a dataset (see [`dataset_items`]). It stays open
+/// while you type in its filter box and closes when you choose.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dataset_combo(
+    ui: &mut Ui,
+    cx: &ToolContext,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    width: f32,
+    selected: &str,
+    current: Option<DatasetId>,
+    picks: &Picks,
+    actions: &mut Vec<Action>,
+) {
+    ComboBox::from_id_salt(id)
+        .width(width)
+        .selected_text(selected)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show_ui(ui, |ui| dataset_items(ui, cx, current, picks, actions));
+}
+
+/// A menu button that picks a dataset (see [`dataset_items`]); like the combo
+/// box it stays open while you use its filter box.
+pub(crate) fn dataset_menu(
+    ui: &mut Ui,
+    cx: &ToolContext,
+    label: &str,
+    picks: &Picks,
+    actions: &mut Vec<Action>,
+) -> egui::Response {
+    egui::containers::menu::MenuButton::new(label)
+        .config(
+            egui::containers::menu::MenuConfig::default()
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+        )
+        .ui(ui, |ui| dataset_items(ui, cx, None, picks, actions))
+        .0
+}
+
+/// The items of a dataset picker (inside a combo box or menu): the leading
+/// choices, the datasets already loaded, the recent ones, then, per folder, the
+/// ones not loaded yet (they are read when chosen). A filter box appears when
+/// the list is long.
 pub(crate) fn dataset_items(
     ui: &mut Ui,
     cx: &ToolContext,
@@ -185,6 +304,12 @@ pub(crate) fn dataset_items(
     actions: &mut Vec<Action>,
 ) {
     let theme = cx.theme;
+    let recent: Vec<&PathBuf> = cx
+        .recents
+        .list(picks.recent)
+        .iter()
+        .filter(|p| !is_loaded(cx, p))
+        .collect();
     let unloaded: usize = cx
         .folders
         .iter()
@@ -193,7 +318,7 @@ pub(crate) fn dataset_items(
         .sum();
     let filter_id = ui.id().with("dataset_filter");
     let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
-    if unloaded + cx.session.store.iter().count() > 12 {
+    if unloaded + recent.len() + cx.session.store.iter().count() > 12 {
         ui.add(
             egui::TextEdit::singleline(&mut filter)
                 .hint_text("filter")
@@ -206,13 +331,19 @@ pub(crate) fn dataset_items(
     let needle = filter.to_lowercase();
     let shown = |name: &str| needle.is_empty() || name.to_lowercase().contains(&needle);
 
+    for lead in &picks.leading {
+        if ui.selectable_label(lead.selected, &lead.label).clicked() {
+            actions.push(lead.action.clone());
+            ui.close();
+        }
+    }
     egui::ScrollArea::vertical()
         .max_height(320.0)
         .auto_shrink([true, true])
         .show(ui, |ui| {
-            let mut any = false;
+            let mut any = !picks.leading.is_empty();
             for (id, d) in cx.session.store.iter() {
-                if shown(&d.name) {
+                if shown(&d.name) && picks.only.as_ref().is_none_or(|ok| ok(d)) {
                     any = true;
                     if ui
                         .selectable_label(current == Some(id), &d.name)
@@ -224,38 +355,54 @@ pub(crate) fn dataset_items(
                     }
                 }
             }
+            let mut section = |ui: &mut Ui, heading: String, entries: Vec<(String, &Path)>| {
+                if entries.is_empty() {
+                    return;
+                }
+                any = true;
+                ui.separator();
+                ui.label(RichText::new(heading).small().color(theme.text_faint));
+                for (label, path) in entries {
+                    if ui
+                        .selectable_label(false, label)
+                        .on_hover_text(format!("Load {}", path.display()))
+                        .clicked()
+                    {
+                        actions.push((picks.from_folder)(path));
+                        ui.close();
+                    }
+                }
+            };
+            section(
+                ui,
+                format!("{} Recent", icon::CLOCK_COUNTER_CLOCKWISE),
+                recent
+                    .iter()
+                    .map(|p| (crate::recent::display_name(p), p.as_path()))
+                    .filter(|(label, _)| shown(label))
+                    .collect(),
+            );
             for folder in cx.folders {
                 let Some(entries) = &folder.entries else {
                     continue;
                 };
-                let fresh: Vec<_> = entries
-                    .iter()
-                    .filter(|e| shown(&e.label) && !is_loaded(cx, &e.path))
-                    .collect();
-                if fresh.is_empty() {
-                    continue;
-                }
-                any = true;
                 let name = folder.dir.file_name().map_or_else(
                     || folder.dir.display().to_string(),
                     |n| n.to_string_lossy().into(),
                 );
-                ui.separator();
-                ui.label(
-                    RichText::new(format!("{} {name}", icon::FOLDER_OPEN))
-                        .small()
-                        .color(theme.text_faint),
+                section(
+                    ui,
+                    format!("{} {name}", icon::FOLDER_OPEN),
+                    entries
+                        .iter()
+                        .filter(|e| {
+                            shown(&e.label)
+                                && !is_loaded(cx, &e.path)
+                                && !recent.iter().any(|r| **r == e.path)
+                        })
+                        .map(|e| (e.label.clone(), e.path.as_path()))
+                        .collect(),
                 );
-                for e in fresh {
-                    if ui
-                        .selectable_label(false, &e.label)
-                        .on_hover_text(format!("Load {}", e.path.display()))
-                        .clicked()
-                    {
-                        actions.push((picks.from_folder)(&e.path));
-                        ui.close();
-                    }
-                }
             }
             if !any {
                 ui.label(
@@ -329,9 +476,13 @@ fn layer_list(ui: &mut Ui, cx: &ToolContext) -> Vec<Action> {
     ui.horizontal(|ui| {
         ui.label(RichText::new("Overlays").strong().color(theme.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.menu_button(format!("{} Add overlay", icon::PLUS), |ui| {
-                dataset_items(ui, cx, None, &Picks::new_overlay(), &mut actions);
-            });
+            dataset_menu(
+                ui,
+                cx,
+                &format!("{} Add overlay", icon::PLUS),
+                &Picks::new_overlay(),
+                &mut actions,
+            );
         });
     });
     if cx.overlays.is_empty() {

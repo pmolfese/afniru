@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use afni_core::afni_colors::AfniColorScale;
 
 use crate::geom::CoordOrient;
+use crate::render::label::{Corner, LabelSize, SliceLabel};
 
 /// Which color theme to use for the application chrome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -60,6 +61,9 @@ pub struct Prefs {
     /// (given on the command line, dropped, or opened) in the Datasets card.
     /// Only the names are read; a dataset is loaded when picked.
     pub folder_browser: bool,
+    /// `AFNIRU_SLICE_NUMBER`, `_CORNER` and `_SIZE`: the slice number drawn on
+    /// each image (also the starting point of the right-click menu).
+    pub slice_label: SliceLabel,
 }
 
 impl Default for Prefs {
@@ -72,6 +76,7 @@ impl Default for Prefs {
             colorscale: AfniColorScale::afni_default(),
             sess_trail: 0,
             folder_browser: true,
+            slice_label: SliceLabel::default(),
         }
     }
 }
@@ -126,6 +131,12 @@ pub const DEFAULT_FILE: &str = "\
                                       //       pick from; only names are read, a
                                       //       dataset loads when you pick it
                                       // NO  = never list folders
+
+   AFNIRU_SLICE_NUMBER      = NO      // YES = draw the slice number on every
+                                      //       image (also set by the right-click
+                                      //       menu of an image)
+   AFNIRU_SLICE_NUMBER_CORNER = TL    // TL | TR | BL | BR
+   AFNIRU_SLICE_NUMBER_SIZE = Medium  // Small | Medium | Large | XL
 
    AFNI_SESSTRAIL           = 0       // directory levels shown before a
                                       // dataset's name (0 = name only)
@@ -212,6 +223,21 @@ impl Prefs {
                 "no" | "false" | "0" => self.left_is_left = false,
                 _ => {}
             },
+            "AFNIRU_SLICE_NUMBER" => match value.as_str() {
+                "yes" | "true" | "1" => self.slice_label.show = true,
+                "no" | "false" | "0" => self.slice_label.show = false,
+                _ => {}
+            },
+            "AFNIRU_SLICE_NUMBER_CORNER" => {
+                if let Some(c) = Corner::parse(&value) {
+                    self.slice_label.corner = c;
+                }
+            }
+            "AFNIRU_SLICE_NUMBER_SIZE" => {
+                if let Some(s) = LabelSize::parse(&value) {
+                    self.slice_label.size = s;
+                }
+            }
             "AFNIRU_FOLDER_BROWSER" => match value.as_str() {
                 "yes" | "true" | "1" => self.folder_browser = true,
                 "no" | "false" | "0" => self.folder_browser = false,
@@ -336,5 +362,22 @@ mod tests {
         assert_eq!(p.theme, ThemeChoice::Light);
         assert!(fs::read_to_string(&path).unwrap().contains("Light"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_slice_number_can_be_set_in_the_file() {
+        let p = Prefs::parse("");
+        assert_eq!(p.slice_label, SliceLabel::default());
+        assert!(!p.slice_label.show);
+        let p = Prefs::parse(
+            "AFNIRU_SLICE_NUMBER = YES\nAFNIRU_SLICE_NUMBER_CORNER = br\nAFNIRU_SLICE_NUMBER_SIZE = XL",
+        );
+        assert!(p.slice_label.show);
+        assert_eq!(p.slice_label.corner, Corner::BottomRight);
+        assert_eq!(p.slice_label.size, LabelSize::ExtraLarge);
+        // Nonsense leaves the defaults.
+        let p =
+            Prefs::parse("AFNIRU_SLICE_NUMBER_CORNER = middle\nAFNIRU_SLICE_NUMBER_SIZE = huge");
+        assert_eq!(p.slice_label, SliceLabel::default());
     }
 }

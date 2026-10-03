@@ -4,10 +4,12 @@
 mod analysis;
 mod app;
 mod data;
+mod export_dialog;
 mod geom;
 mod loader;
 mod prefs;
 mod processing;
+mod recent;
 mod render;
 mod session;
 #[cfg(test)]

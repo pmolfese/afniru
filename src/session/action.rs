@@ -6,6 +6,8 @@
 use super::overlay::{LayerId, OverlayChange};
 use super::series::SeriesChange;
 use super::store::DatasetId;
+use crate::geom::Plane;
+use crate::render::export::ExportWhat;
 
 /// What a dataset being opened should become.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +18,10 @@ pub enum LoadRole {
     Overlay,
     /// The dataset of an existing overlay layer (replacing its dataset).
     Layer(LayerId),
+    /// The dataset the Graph plots (it need not be the underlay or an overlay).
+    GraphSource,
+    /// The Graph's fit (any dataset with as many time points).
+    GraphFit,
 }
 
 /// A request to change the session.
@@ -51,6 +57,11 @@ pub enum Action {
     CloseFolder(std::path::PathBuf),
     /// Stop waiting for load `id` (an id from the loading list).
     CancelLoad(u64),
+    /// Save images of the views (a slice, the three views, a montage). The
+    /// session does nothing with it: the app renders and writes the files.
+    Export(ExportWhat),
+    /// Open the export dialog, with this plane preselected.
+    ExportDialog(Plane),
     /// Change the Graph view's settings.
     Series(SeriesChange),
     /// Ask for a stimulus file and load it into the Graph view. The session

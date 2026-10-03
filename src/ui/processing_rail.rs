@@ -54,6 +54,14 @@ pub struct ProcessingRail {
     /// Detail window open for the selected step.
     #[serde(skip)]
     pub detail_open: bool,
+    /// The step whose status pop-up is showing (the pointer is over its
+    /// traffic light or over the pop-up).
+    #[serde(skip)]
+    status_popup: Option<usize>,
+    /// Where the pop-up was drawn last frame: it stays open while the pointer
+    /// is over it (or crossing the gap to it from the traffic light).
+    #[serde(skip)]
+    popup_rect: Option<Rect>,
     /// Width taken on the right (panel, strip, drawer), so the detail window
     /// sits beside it instead of on top.
     #[serde(skip)]
@@ -101,6 +109,74 @@ fn pill(ui: &mut Ui, theme: &Theme, h: Health, tip: &str) {
         WidgetInfo::labeled(WidgetType::Label, true, format!("{}: {tip}", h.label()))
     });
     response.on_hover_text(format!("{}: {tip}", h.label()));
+}
+
+/// Is the pointer inside `rect`?
+fn pointer_in(ctx: &egui::Context, rect: Rect) -> bool {
+    ctx.pointer_hover_pos().is_some_and(|p| rect.contains(p))
+}
+
+/// The pop-up under a traffic light: the step, its state and why, and an
+/// invitation to click. Returns its rectangle and whether it was clicked.
+fn status_popup(
+    ctx: &egui::Context,
+    theme: &Theme,
+    step: &ProcessingStep,
+    anchor: Rect,
+) -> (Rect, bool) {
+    let health = step.assessment.health;
+    let mut clicked = false;
+    let area = egui::Area::new(Id::new("processing_status_popup"))
+        .order(egui::Order::Tooltip)
+        .pivot(Align2::RIGHT_TOP)
+        .fixed_pos(pos2(anchor.right() + 6.0, anchor.bottom() + 6.0))
+        .show(ctx, |ui| {
+            let frame = egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(300.0);
+                ui.horizontal(|ui| {
+                    let (dot, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                    ui.painter()
+                        .circle_filled(dot.center(), 6.0, health_color(theme, health));
+                    ui.label(
+                        RichText::new(format!("{} · {}", step.label, health.label())).strong(),
+                    );
+                });
+                ui.add(egui::Label::new(step.assessment.reason()).wrap());
+                // What is not fine, beyond the one-line reason.
+                for e in step
+                    .assessment
+                    .evidence
+                    .iter()
+                    .filter(|e| e.health != Health::Good)
+                    .take(3)
+                {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("• {}: {}", e.title, e.finding))
+                                .small()
+                                .color(health_color(theme, e.health)),
+                        )
+                        .wrap(),
+                    );
+                }
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new(format!("{} Click for every check and file", icon::INFO))
+                        .small()
+                        .color(theme.accent),
+                );
+            });
+            let r = ui.interact(
+                frame.response.rect,
+                Id::new("processing_status_popup_hit"),
+                Sense::click(),
+            );
+            clicked = r.clicked();
+            if r.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+        });
+    (area.response.rect, clicked)
 }
 
 impl ProcessingRail {
@@ -278,6 +354,8 @@ impl ProcessingRail {
         let row_ids: Vec<Id> = ids.iter().map(|i| Id::new(("proc_step", &i.0))).collect();
         let mut clicked = None;
         let mut focused = None;
+        let mut show_details: Option<StepId> = None;
+        let mut pill_rects: Vec<Rect> = Vec::new();
         let n = ids.len();
         for (i, step) in model.run.steps.iter().enumerate() {
             let selected = model.selected.as_ref() == Some(&step.id);
@@ -345,13 +423,20 @@ impl ProcessingRail {
             response.widget_info(|| {
                 WidgetInfo::selected(WidgetType::Button, true, selected, label.clone())
             });
-            let response = response.on_hover_text(format!(
-                "{} — {}: {}",
-                step.label,
-                health.label(),
-                step.assessment.reason()
-            ));
-            if response.clicked() {
+            // The traffic light: hover for the status, click for the details.
+            let pill_hit = ui.interact(
+                pill_rect.expand(3.0),
+                Id::new(("proc_pill", &step.id.0)),
+                Sense::click(),
+            );
+            if pill_hit.hovered() {
+                self.status_popup = Some(i);
+            }
+            pill_rects.push(pill_rect);
+            if pill_hit.clicked() {
+                show_details = Some(step.id.clone());
+            }
+            if response.clicked() && !pill_hit.hovered() {
                 clicked = Some(step.id.clone());
                 // So the arrow keys work right after a click.
                 ui.ctx().memory_mut(|m| m.request_focus(row_ids[i]));
@@ -377,7 +462,39 @@ impl ProcessingRail {
                 clicked = Some(ids[t].clone());
             }
         }
-        if let Some(id) = clicked {
+        // The status pop-up of the traffic light under the pointer.
+        if let Some(i) = self.status_popup {
+            let pill = pill_rects.get(i).map(|r| r.expand(5.0));
+            // Over the light, or over the pop-up as it was last frame (and the
+            // gap between them).
+            let keep = pill.is_some_and(|p| {
+                pointer_in(ui.ctx(), p)
+                    || self
+                        .popup_rect
+                        .is_some_and(|r| pointer_in(ui.ctx(), p.union(r.expand(4.0))))
+            });
+            match model.run.steps.get(i) {
+                Some(step) if keep => {
+                    let (rect, click) = status_popup(ui.ctx(), theme, step, pill_rects[i]);
+                    self.popup_rect = Some(rect);
+                    if click {
+                        show_details = Some(step.id.clone());
+                    }
+                }
+                _ => {
+                    self.status_popup = None;
+                    self.popup_rect = None;
+                }
+            }
+        }
+        if let Some(id) = show_details {
+            // A click on a traffic light or its pop-up: select the step and
+            // open its checks and files.
+            model.select(Some(id));
+            self.detail_open = true;
+            self.status_popup = None;
+            self.popup_rect = None;
+        } else if let Some(id) = clicked {
             if model.selected.as_ref() == Some(&id) {
                 // Clicking the selected step again leaves it selected but
                 // closes the expansion's detail window.
@@ -782,6 +899,7 @@ mod tests {
         h.run();
         assert_eq!(h.state().model.selected, Some(StepId("align".into())));
         h.key_press(Key::ArrowUp);
+        h.run();
         h.key_press(Key::ArrowUp);
         h.run();
         assert_eq!(h.state().model.selected, Some(StepId("outcount".into())));

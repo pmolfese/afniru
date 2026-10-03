@@ -7,7 +7,7 @@ use std::sync::Arc;
 use egui::{Context, Frame, Key, Margin, Rect, RichText, Stroke, Ui, UiBuilder, pos2, vec2};
 
 use super::theme::Theme;
-use super::view_card::{CardContext, OverlayView, PlaneCard};
+use super::view_card::{CardContext, OverlayView, PlaneCard, export_tile};
 use super::view_state::{Layout, ViewOptions};
 use super::widgets::readout::format_value;
 use crate::data::Dataset;
@@ -15,10 +15,11 @@ use crate::geom::coords::{ijk_to_ras, magnitude_and_letter};
 use crate::geom::{CoordOrient, Plane};
 use crate::prefs::Prefs;
 use crate::render::compose::Window;
+use crate::render::export::{self, ExportOptions, ExportWhat, Rgba8Image, ViewsLayout};
 use crate::render::layers::{self, LayerInput};
 use crate::render::overlay::{OverlayFrames, max_abs};
 use crate::render::resample::{self, Grid};
-use crate::render::slice::PlaneMap;
+use crate::render::slice::{self, PlaneMap};
 use afni_core::color::Rgba;
 
 use super::graph_view::{GraphEvents, GraphInput, graph_view};
@@ -390,10 +391,19 @@ impl ViewArea {
         let cells = cell_rects(area, self.options.layout);
         // Axial, sagittal, coronal, then the Graph (AFNI's usual arrangement).
         let order = [Plane::Axial, Plane::Sagittal, Plane::Coronal];
+        let mut label_change = None;
         for (cell, plane) in cells.iter().zip(order) {
             let card = &mut self.cards[Plane::ALL.iter().position(|p| *p == plane).unwrap_or(0)];
             let active = cur.active == plane;
-            card_frame(ui, theme, *cell, active, |ui| card.ui(ui, &cx, cur));
+            let events = card_frame(ui, theme, *cell, active, |ui| card.ui(ui, &cx, cur));
+            if let Some(label) = events.label {
+                label_change = Some(label);
+            }
+            self.actions.extend(events.actions);
+        }
+        // The slice number is one setting for all three views.
+        if let Some(label) = label_change {
+            self.options.slice_label = label;
         }
         if let Some(cell) = cells.get(3) {
             let events = card_frame(ui, theme, *cell, false, |ui| self.graph(ui, theme, t, cur));
@@ -430,6 +440,143 @@ impl ViewArea {
     /// The changes the Graph view asked for since the last call.
     pub fn take_actions(&mut self) -> Vec<SessionAction> {
         std::mem::take(&mut self.actions)
+    }
+
+    /// Render what `what` asks for as pictures: the files to write, each with
+    /// the suffix to add to the chosen name (empty for a single picture).
+    /// Uses the same slices, window, overlays and orientation as the screen.
+    pub fn export_images(
+        &mut self,
+        t: &Target,
+        cur: &Cursor,
+        what: ExportWhat,
+        opts: &ExportOptions,
+        background: [u8; 3],
+        theme: &Theme,
+    ) -> Result<Vec<(String, Rgba8Image)>, String> {
+        let ds = t.ds;
+        let Some(cache) = self.ensure_cache(t) else {
+            return Err("this dataset has no readable sub-brick".into());
+        };
+        let (frame, auto) = (cache.frame.clone(), cache.auto);
+        let window = self.window.unwrap_or(auto);
+        self.ensure_overlays(t);
+        let overlays: Vec<OverlayView> = t
+            .overlays
+            .iter()
+            .filter_map(|o| {
+                Some(OverlayView {
+                    layer: o.layer,
+                    frames: &self.overlay_cache.get(&o.layer.id)?.frames,
+                })
+            })
+            .collect();
+        let sub_frames = self.sub_frames();
+        let cx = CardContext {
+            theme,
+            ds,
+            frame: &frame,
+            window,
+            generation: t.generation,
+            options: self.options,
+            overlays,
+            sub_frames: &sub_frames,
+        };
+        // One scale for every picture: the smallest voxel edge is `zoom` pixels.
+        let smallest = ds.voxel_mm.iter().copied().fold(f64::INFINITY, f64::min);
+        let px_per_mm = f64::from(opts.zoom.clamp(1, 8)) / smallest.max(1e-6);
+        let tile = |plane: Plane, index: usize, with_cursor: bool, letters: bool| {
+            export_tile(
+                &cx,
+                plane,
+                index,
+                with_cursor.then_some(cur.ijk),
+                opts,
+                px_per_mm,
+                letters,
+                background,
+            )
+            .ok_or_else(|| format!("the {} slice {index} cannot be drawn", plane.name()))
+        };
+        let index_of = |plane: Plane| {
+            let axis = ds.orient.slice_axis(plane);
+            cur.ijk[axis]
+        };
+        let views = [Plane::Axial, Plane::Sagittal, Plane::Coronal];
+        match what {
+            ExportWhat::Slice(plane) => Ok(vec![(
+                String::new(),
+                tile(plane, index_of(plane), opts.crosshair, opts.letters)?,
+            )]),
+            ExportWhat::Views(layout) => {
+                let tiles = views
+                    .iter()
+                    .map(|&p| tile(p, index_of(p), opts.crosshair, opts.letters))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let gap = 2 * opts.zoom as usize;
+                Ok(match layout {
+                    ViewsLayout::Individual => views
+                        .iter()
+                        .zip(tiles)
+                        .map(|(p, img)| (p.name().to_lowercase(), img))
+                        .collect(),
+                    ViewsLayout::Row => vec![(
+                        String::new(),
+                        export::arrange(&tiles, 1, 3, gap, background),
+                    )],
+                    ViewsLayout::Column => {
+                        vec![(
+                            String::new(),
+                            export::arrange(&tiles, 3, 1, gap, background),
+                        )]
+                    }
+                    // The fourth cell is where the Graph is on screen; it is
+                    // left empty (the Graph is not saved).
+                    ViewsLayout::Grid => {
+                        vec![(
+                            String::new(),
+                            export::arrange(&tiles, 2, 2, gap, background),
+                        )]
+                    }
+                })
+            }
+            ExportWhat::Montage(spec) => {
+                let count = ds.dims[ds.orient.slice_axis(spec.plane)];
+                let slices = spec.slices(count);
+                if slices.is_empty() {
+                    return Err("no slices in that range".into());
+                }
+                let tiles = slices
+                    .iter()
+                    .map(|&i| tile(spec.plane, i, false, false))
+                    .collect::<Result<Vec<_>, _>>()?;
+                // Fewer slices than tiles: use only the rows needed.
+                let cols = spec.cols.max(1).min(tiles.len());
+                let rows = tiles.len().div_ceil(cols);
+                let mut img = export::arrange(&tiles, rows, cols, opts.zoom as usize, background);
+                if opts.letters {
+                    let m =
+                        PlaneMap::new(ds.dims, &ds.orient, spec.plane, self.options.left_is_left);
+                    let _ = m;
+                    if let Some(s) = slice::extract(
+                        &frame,
+                        ds.dims,
+                        ds.voxel_mm,
+                        &ds.orient,
+                        spec.plane,
+                        slices[0],
+                        self.options.left_is_left,
+                    ) {
+                        img = export::with_letters(
+                            &img,
+                            [s.left, s.right, s.top, s.bottom],
+                            background,
+                        );
+                    }
+                }
+                Ok(vec![(String::new(), img)])
+            }
+        }
     }
 
     /// The strip under the views: where the crosshair is, and the window.

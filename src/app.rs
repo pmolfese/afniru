@@ -3,11 +3,16 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::data::{Dataset, synthetic};
+use crate::data::{Dataset, Source, synthetic};
+use crate::export_dialog::{ExportDialog, Outcome as ExportOutcome};
 use crate::loader::{FolderListing, Loader};
+use crate::prefs::CanvasBackground;
 use crate::prefs::Prefs;
 use crate::processing::StepId;
 use crate::processing::model::{ProcessingModel, ViewOption};
+use crate::recent::{RecentKind, Recents};
+use crate::render::export::{self, ExportOptions, ExportWhat, Rgba8Image};
+use crate::render::label::SliceLabel;
 use crate::session::action::LoadRole;
 use crate::session::overlay::OverlayChange;
 use crate::session::series::{SeriesChange, Stim};
@@ -34,6 +39,14 @@ pub struct App {
     controller: ControllerUi,
     /// The clusters of the layers Clusterize is hooked under.
     clusters: Engine,
+    /// The look of saved images (size, letters, crosshair).
+    export_options: ExportOptions,
+    /// The "Save images" dialog, when open.
+    export_dialog: Option<ExportDialog>,
+    /// A message for the status bar that is not an error (what was saved).
+    notice: Option<String>,
+    /// The datasets chosen recently, for the dropdowns (kept between runs).
+    recents: Recents,
     /// Datasets being read (and folders being listed) in the background.
     loader: Loader,
     /// Folders given on the command line or opened, with their datasets.
@@ -71,6 +84,10 @@ impl App {
             error: None,
             controller: ControllerUi::default(),
             clusters: Engine::default(),
+            export_options: ExportOptions::default(),
+            export_dialog: None,
+            notice: None,
+            recents: Recents::default(),
             loader: Loader::default(),
             folders: Vec::new(),
             processing: None,
@@ -124,6 +141,9 @@ impl App {
         }
         if let Some(saved) = eframe::get_value::<ProcessingRail>(storage, RAIL_STORAGE_KEY) {
             self.rail = saved;
+        }
+        if let Some(saved) = eframe::get_value::<Recents>(storage, RECENTS_STORAGE_KEY) {
+            self.recents = saved;
         }
     }
 
@@ -269,6 +289,25 @@ impl App {
         self.loader.load(path, role, self.prefs.sess_trail);
     }
 
+    /// How many time points the Graph is plotting.
+    fn plotted_length(&self) -> usize {
+        let series = &self.session.controller().series;
+        series
+            .source
+            .and_then(|id| self.session.store.get(id))
+            .or_else(|| self.session.underlay())
+            .map_or(0, |d| d.nvols)
+    }
+
+    /// Remember a dataset chosen from those already loaded.
+    fn note_loaded(&mut self, kind: RecentKind, id: crate::session::DatasetId) {
+        if let Some(d) = self.session.store.get(id)
+            && let Source::File(path) = &d.source
+        {
+            self.recents.note(kind, path);
+        }
+    }
+
     /// Apply the loads that finished and take in the folder listings that
     /// arrived. A failed load is reported in the status bar.
     fn poll_loads(&mut self) {
@@ -277,7 +316,32 @@ impl App {
             match loaded.result {
                 Ok(d) => {
                     self.error = None;
+                    self.recents.note(RecentKind::of(loaded.role), &loaded.path);
                     match loaded.role {
+                        LoadRole::GraphSource if d.nvols < 2 => {
+                            self.error = Some(format!(
+                                "{}: one time point, so there is no time series to plot",
+                                d.name
+                            ));
+                        }
+                        LoadRole::GraphSource => {
+                            let id = self.session.store.add(d);
+                            self.session
+                                .apply(SessionAction::Series(SeriesChange::Source(Some(id))));
+                        }
+                        LoadRole::GraphFit => {
+                            let plotted = self.plotted_length();
+                            if d.nvols == plotted {
+                                let id = self.session.store.add(d);
+                                self.session
+                                    .apply(SessionAction::Series(SeriesChange::Fit(Some(id))));
+                            } else {
+                                self.error = Some(format!(
+                                    "{}: {} time points, but the plotted series has {plotted}",
+                                    d.name, d.nvols
+                                ));
+                            }
+                        }
                         LoadRole::Underlay => self.add(d),
                         LoadRole::Overlay => {
                             let id = self.session.store.add(d);
@@ -336,6 +400,9 @@ impl App {
     /// Carry out the actions cards asked for; reset the view's caches if
     /// what it displays changed.
     fn apply(&mut self, actions: Vec<SessionAction>) {
+        if !actions.is_empty() {
+            self.notice = None; // what was saved is news only until the next action
+        }
         let before = self.session.generation;
         for a in actions {
             match a {
@@ -359,9 +426,30 @@ impl App {
                     self.folders.retain(|f| f.dir != dir);
                     continue;
                 }
+                SessionAction::Export(what) => {
+                    let opts = self.current_export_options();
+                    self.export(what, &opts);
+                    continue;
+                }
+                SessionAction::ExportDialog(plane) => {
+                    self.open_export_dialog(plane);
+                    continue;
+                }
                 SessionAction::CancelLoad(id) => {
                     self.loader.cancel(id);
                     continue;
+                }
+                _ => {}
+            }
+            match &a {
+                SessionAction::SetUnderlay(id) => self.note_loaded(RecentKind::Underlay, *id),
+                SessionAction::AddOverlay(id)
+                | SessionAction::Layer(_, OverlayChange::Dataset(id)) => {
+                    self.note_loaded(RecentKind::Overlay, *id);
+                }
+                SessionAction::Series(SeriesChange::Source(Some(id)))
+                | SessionAction::Series(SeriesChange::Fit(Some(id))) => {
+                    self.note_loaded(RecentKind::Graph, *id);
                 }
                 _ => {}
             }
@@ -369,6 +457,140 @@ impl App {
         }
         if self.session.generation != before {
             self.view.reset();
+        }
+    }
+
+    /// The saved-image options, with the slice number as shown on screen.
+    fn current_export_options(&self) -> ExportOptions {
+        ExportOptions {
+            label: self.view.options.slice_label,
+            ..self.export_options
+        }
+    }
+
+    /// The canvas color saved images are laid out on.
+    fn export_background(&self) -> [u8; 3] {
+        match self.prefs.canvas {
+            CanvasBackground::Black => [0, 0, 0],
+            CanvasBackground::White => [255, 255, 255],
+        }
+    }
+
+    /// Open the "Save images" dialog for `plane`.
+    fn open_export_dialog(&mut self, plane: crate::geom::Plane) {
+        let Some(ds) = self.session.underlay() else {
+            return;
+        };
+        let count = ds.dims[ds.orient.slice_axis(plane)];
+        self.export_dialog = Some(ExportDialog::new(
+            plane,
+            count,
+            self.current_export_options(),
+        ));
+    }
+
+    /// Render the pictures `what` asks for, as the views show them now.
+    fn render_export(
+        &mut self,
+        what: ExportWhat,
+        opts: &ExportOptions,
+    ) -> Result<Vec<(String, Rgba8Image)>, String> {
+        let Some(underlay) = self.session.underlay().cloned() else {
+            return Err("there is nothing to save: no dataset".into());
+        };
+        let layers = self.session.overlay_layers();
+        let series = self.session.controller().series.clone();
+        let cursor = self.session.controller().cursor;
+        let background = self.export_background();
+        let target = Target {
+            ds: &underlay,
+            sub_brick: self.session.controller().underlay_sub_brick,
+            generation: self.session.generation,
+            overlays: layers
+                .iter()
+                .map(|(layer, ds)| OverlayTarget {
+                    layer,
+                    ds: ds.as_ref(),
+                    keep: self.clusters.keep(layer),
+                })
+                .collect(),
+            store: &self.session.store,
+            series: &series,
+        };
+        self.view
+            .export_images(&target, &cursor, what, opts, background, &Theme::dark())
+    }
+
+    /// Ask for a file name and save what `what` asks for. Several pictures
+    /// (separate files) are named after the chosen name.
+    fn export(&mut self, what: ExportWhat, opts: &ExportOptions) {
+        let default = match what {
+            ExportWhat::Slice(p) => format!("{}.png", p.name().to_lowercase()),
+            ExportWhat::Views(_) => "views.png".to_string(),
+            ExportWhat::Montage(m) => format!("montage_{}.png", m.plane.name().to_lowercase()),
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Save image")
+            .add_filter("PNG", &["png"])
+            .set_file_name(default)
+            .save_file()
+        else {
+            return;
+        };
+        self.export_to(what, opts, &path);
+    }
+
+    /// Render and write to `path` (see [`App::export`]).
+    fn export_to(&mut self, what: ExportWhat, opts: &ExportOptions, path: &Path) {
+        let result = self.render_export(what, opts).and_then(|images| {
+            let mut written = Vec::new();
+            for (suffix, image) in &images {
+                let file = if suffix.is_empty() {
+                    path.with_extension("png")
+                } else {
+                    export::numbered_name(path, suffix)
+                };
+                image.save_png(&file)?;
+                written.push(file);
+            }
+            Ok(written)
+        });
+        match result {
+            Ok(files) => {
+                self.error = None;
+                self.notice = Some(match files.as_slice() {
+                    [one] => format!("Saved {}", one.display()),
+                    many => format!("Saved {} images next to {}", many.len(), path.display()),
+                });
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// The "Save images" dialog.
+    fn export_dialog(&mut self, ctx: &egui::Context, theme: &Theme) {
+        let Some(dialog) = &mut self.export_dialog else {
+            return;
+        };
+        let mut outcome = ExportOutcome::Open;
+        let response = egui::Modal::new(egui::Id::new("export_dialog")).show(ctx, |ui| {
+            outcome = dialog.ui(ui, theme);
+        });
+        match outcome {
+            ExportOutcome::Save(what, opts) => {
+                self.export_options = ExportOptions {
+                    label: SliceLabel::default(),
+                    ..opts
+                };
+                // The slice number is the views' setting; the dialog's box is
+                // a shortcut for it.
+                self.view.options.slice_label.show = opts.label.show;
+                self.export_dialog = None;
+                self.export(what, &opts);
+            }
+            ExportOutcome::Cancel => self.export_dialog = None,
+            ExportOutcome::Open if response.should_close() => self.export_dialog = None,
+            ExportOutcome::Open => {}
         }
     }
 
@@ -504,6 +726,7 @@ impl App {
                 self.error.as_deref(),
                 &self.view.conventions(underlay.as_deref()),
                 &self.loader.loading(),
+                self.notice.as_deref(),
             );
         });
 
@@ -551,6 +774,7 @@ impl App {
                     .as_deref()
                     .and_then(|d| self.view.value_at(d, &controller.cursor)),
                 loading: &loading,
+                recents: &self.recents,
                 folders: &self.folders,
                 overlays: layers
                     .iter()
@@ -639,9 +863,13 @@ impl App {
             });
         self.apply(graph_actions);
         self.view_dialog(&ctx, &theme);
+        self.export_dialog(&ctx, &theme);
         action
     }
 }
+
+/// Storage key for the recently chosen datasets.
+const RECENTS_STORAGE_KEY: &str = "afniru_recents";
 
 /// Storage key for the Processing rail's state.
 const RAIL_STORAGE_KEY: &str = "afniru_processing_rail";
@@ -656,6 +884,7 @@ impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, controller::STORAGE_KEY, &self.controller);
         eframe::set_value(storage, RAIL_STORAGE_KEY, &self.rail);
+        eframe::set_value(storage, RECENTS_STORAGE_KEY, &self.recents);
     }
 }
 
@@ -667,7 +896,10 @@ mod tests {
     use egui_kittest::kittest::Queryable;
 
     use super::*;
+    use crate::geom::Plane;
     use crate::prefs::{CanvasBackground, ThemeChoice};
+    use crate::recent::RecentKind;
+    use crate::render::export::{MontageSpec, ViewsLayout};
     use crate::tools::ToolId;
 
     fn fixture(name: &str) -> PathBuf {
@@ -1523,6 +1755,470 @@ mod tests {
         snapshot("masks_threshold_card", app, vec2(1300.0, 1500.0), None);
     }
 
+    // ---- Saving images ----
+
+    fn export_app() -> (App, crate::testutil::TempDir) {
+        let (mut app, _) = clusterize_app();
+        // The crosshair at a known voxel.
+        app.apply(vec![SessionAction::MoveCrosshair([1, 2, 3])]);
+        (app, crate::testutil::TempDir::new("export"))
+    }
+
+    fn plain() -> ExportOptions {
+        ExportOptions {
+            zoom: 4,
+            letters: false,
+            crosshair: false,
+            label: SliceLabel::default(),
+        }
+    }
+
+    fn png(path: &Path) -> image::RgbaImage {
+        image::open(path).unwrap().to_rgba8()
+    }
+
+    #[test]
+    fn a_saved_slice_has_square_pixels_at_the_chosen_zoom() {
+        let (mut app, dir) = export_app();
+        // 4x5x6 voxels of 2x2x3 mm; the smallest edge (2 mm) is 4 pixels wide.
+        let axial = dir.path().join("a.png");
+        app.export_to(ExportWhat::Slice(Plane::Axial), &plain(), &axial);
+        let img = png(&axial);
+        assert_eq!((img.width(), img.height()), (4 * 2 * 2, 5 * 2 * 2)); // 16 x 20
+        // A coronal slice is 4 voxels across and 6 slices (3 mm each) tall.
+        let coronal = dir.path().join("c.png");
+        app.export_to(ExportWhat::Slice(Plane::Coronal), &plain(), &coronal);
+        let img = png(&coronal);
+        assert_eq!((img.width(), img.height()), (16, 6 * 3 * 2)); // 16 x 36
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.starts_with("Saved"))
+        );
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn zoom_scales_every_voxel_to_a_block() {
+        let (mut app, dir) = export_app();
+        let mut opts = plain();
+        opts.zoom = 1;
+        let path = dir.path().join("small.png");
+        app.export_to(ExportWhat::Slice(Plane::Axial), &opts, &path);
+        let small = png(&path);
+        opts.zoom = 3;
+        let path = dir.path().join("big.png");
+        app.export_to(ExportWhat::Slice(Plane::Axial), &opts, &path);
+        let big = png(&path);
+        assert_eq!((small.width(), small.height()), (4, 5)); // 1 px per 2 mm
+        assert_eq!((big.width(), big.height()), (12, 15));
+        // Each voxel is a flat block: no smoothing between pixels.
+        assert_eq!(big.get_pixel(0, 0), big.get_pixel(2, 2)); // one voxel, 3x3 pixels
+        assert_eq!(big.get_pixel(0, 0), big.get_pixel(2, 0));
+    }
+
+    #[test]
+    fn the_three_views_save_as_a_row_a_column_a_grid_or_separate_files() {
+        let (mut app, dir) = export_app();
+        let mut size = |what, name: &str| {
+            let path = dir.path().join(name);
+            app.export_to(what, &plain(), &path);
+            path
+        };
+        // Tiles: axial 16x20, sagittal 20x36 (5 across, 6x3 mm down), coronal 16x36.
+        let row = png(&size(ExportWhat::Views(ViewsLayout::Row), "row.png"));
+        let gap = 8;
+        assert_eq!((row.width(), row.height()), (3 * 20 + 2 * gap, 36));
+        let column = png(&size(ExportWhat::Views(ViewsLayout::Column), "col.png"));
+        assert_eq!((column.width(), column.height()), (20, 3 * 36 + 2 * gap));
+        let grid = png(&size(ExportWhat::Views(ViewsLayout::Grid), "grid.png"));
+        assert_eq!((grid.width(), grid.height()), (2 * 20 + gap, 2 * 36 + gap));
+        // Separate files are named after the chosen one.
+        let _ = size(ExportWhat::Views(ViewsLayout::Individual), "fig.png");
+        for view in ["axial", "sagittal", "coronal"] {
+            assert!(
+                dir.path().join(format!("fig_{view}.png")).is_file(),
+                "{view}"
+            );
+        }
+        assert!(!dir.path().join("fig.png").exists());
+    }
+
+    #[test]
+    fn a_montage_lays_slices_out_left_to_right_and_top_to_bottom() {
+        let (mut app, dir) = export_app();
+        let spec = MontageSpec {
+            plane: Plane::Axial,
+            rows: 2,
+            cols: 3,
+            first: 0,
+            last: 5,
+            step: 1,
+        };
+        let path = dir.path().join("m.png");
+        app.export_to(ExportWhat::Montage(spec), &plain(), &path);
+        let img = png(&path);
+        let gap = 4; // zoom pixels between tiles
+        assert_eq!(
+            (img.width(), img.height()),
+            (3 * 16 + 2 * gap, 2 * 20 + gap)
+        );
+        // Fewer slices than tiles use only the rows they need.
+        let short = MontageSpec { last: 2, ..spec };
+        let path = dir.path().join("short.png");
+        app.export_to(ExportWhat::Montage(short), &plain(), &path);
+        let img = png(&path);
+        assert_eq!((img.width(), img.height()), (3 * 16 + 2 * gap, 20));
+        // A range with no slices is an error, not an empty file.
+        let none = MontageSpec {
+            first: 9,
+            last: 9,
+            ..spec
+        };
+        app.export_to(
+            ExportWhat::Montage(none),
+            &plain(),
+            &dir.path().join("none.png"),
+        );
+        assert!(app.error.is_some());
+        assert!(!dir.path().join("none.png").exists());
+    }
+
+    #[test]
+    fn orientation_letters_the_slice_number_and_the_crosshair_are_drawn_when_asked() {
+        let (mut app, dir) = export_app();
+        let count_white = |img: &image::RgbaImage| img.pixels().filter(|p| p.0[0] >= 200).count();
+        let base_path = dir.path().join("base.png");
+        app.export_to(ExportWhat::Slice(Plane::Axial), &plain(), &base_path);
+        let base = png(&base_path);
+        // Letters make the picture bigger.
+        let mut opts = plain();
+        opts.letters = true;
+        let p = dir.path().join("letters.png");
+        app.export_to(ExportWhat::Slice(Plane::Axial), &opts, &p);
+        let with_letters = png(&p);
+        assert!(with_letters.width() > base.width() && with_letters.height() > base.height());
+        // The slice number adds white pixels in its corner; off, none.
+        let mut opts = plain();
+        opts.label = SliceLabel {
+            show: true,
+            corner: crate::render::label::Corner::BottomRight,
+            size: crate::render::label::LabelSize::ExtraLarge,
+        };
+        let p = dir.path().join("number.png");
+        app.export_to(ExportWhat::Slice(Plane::Axial), &opts, &p);
+        let numbered = png(&p);
+        // The number changes the bottom right corner and leaves the top left alone.
+        let differs = |x0: u32, x1: u32, y0: u32, y1: u32| {
+            (y0..y1).any(|y| (x0..x1).any(|x| numbered.get_pixel(x, y) != base.get_pixel(x, y)))
+        };
+        let (w, h) = (base.width(), base.height());
+        assert!(differs(w / 2, w, h / 2, h));
+        assert!(!differs(0, w / 4, 0, h / 4));
+        assert_eq!(
+            (numbered.width(), numbered.height()),
+            (base.width(), base.height())
+        );
+        // The crosshair changes the picture without changing its size.
+        let mut opts = plain();
+        opts.crosshair = true;
+        let p = dir.path().join("cross.png");
+        app.export_to(ExportWhat::Slice(Plane::Axial), &opts, &p);
+        let crossed = png(&p);
+        assert_eq!(
+            (crossed.width(), crossed.height()),
+            (base.width(), base.height())
+        );
+        assert_ne!(crossed.as_raw(), base.as_raw());
+    }
+
+    #[test]
+    fn the_saved_picture_shows_the_overlay_like_the_screen_does() {
+        let (mut app, dir) = export_app();
+        let path = dir.path().join("with.png");
+        app.export_to(ExportWhat::Slice(Plane::Axial), &plain(), &path);
+        let with = png(&path);
+        // Hide the overlay and save again: the pictures differ.
+        let id = layer_ids(&app)[0];
+        app.apply(vec![SessionAction::Layer(
+            id,
+            OverlayChange::Visible(false),
+        )]);
+        let path = dir.path().join("without.png");
+        app.export_to(ExportWhat::Slice(Plane::Axial), &plain(), &path);
+        assert_ne!(with.as_raw(), png(&path).as_raw());
+    }
+
+    #[test]
+    fn saving_with_no_dataset_is_an_error() {
+        let mut app = App::new(
+            prefs(ThemeChoice::Dark, CanvasBackground::Black),
+            &[],
+            false,
+        );
+        let dir = crate::testutil::TempDir::new("none");
+        app.export_to(
+            ExportWhat::Slice(Plane::Axial),
+            &plain(),
+            &dir.path().join("x.png"),
+        );
+        assert!(app.error.is_some());
+    }
+
+    #[test]
+    fn the_white_canvas_pref_gives_a_white_background_to_montages_and_views() {
+        let (mut app, dir) = export_app();
+        app.prefs.canvas = CanvasBackground::White;
+        let path = dir.path().join("w.png");
+        app.export_to(ExportWhat::Views(ViewsLayout::Grid), &plain(), &path);
+        let img = png(&path);
+        // The empty fourth cell (the Graph's) is the background.
+        assert_eq!(
+            img.get_pixel(img.width() - 1, img.height() - 1).0,
+            [255, 255, 255, 255]
+        );
+    }
+
+    /// Right-click at `pos` (press and release of the secondary button).
+    fn right_click(harness: &mut egui_kittest::Harness<'_, App>, pos: egui::Pos2) {
+        harness.hover_at(pos);
+        harness.run();
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run();
+        }
+    }
+
+    #[test]
+    fn the_right_click_menu_turns_the_slice_number_on_for_every_view() {
+        let (app, _) = clusterize_app();
+        let mut harness = run_frames(app, vec2(1300.0, 900.0));
+        assert!(!harness.state().view.options.slice_label.show);
+        // Right-click the sagittal image (any view will do).
+        let header = harness.get_all_by_value("Sagittal").next().unwrap().rect();
+        right_click(&mut harness, header.center() + vec2(0.0, 120.0));
+        harness.get_by_label("Slice number").click();
+        harness.run();
+        let label = harness.state().view.options.slice_label;
+        assert!(label.show);
+        // The setting is the views', not one card's: the axial card draws it too.
+        harness.snapshot("slice_numbers_on_all_views");
+    }
+
+    #[test]
+    fn the_menu_moves_and_resizes_the_number() {
+        use crate::render::label::{Corner, LabelSize};
+        let (app, _) = clusterize_app();
+        let mut harness = run_frames(app, vec2(1300.0, 900.0));
+        let header = harness.get_all_by_value("Axial").next().unwrap().rect();
+        right_click(&mut harness, header.center() + vec2(0.0, 120.0));
+        harness.get_by_label_contains("Number position").click();
+        harness.run();
+        harness.get_by_label("bottom right").click();
+        harness.run();
+        let l = harness.state().view.options.slice_label;
+        assert_eq!(l.corner, Corner::BottomRight);
+        assert!(l.show, "choosing a position turns the number on");
+        right_click(&mut harness, header.center() + vec2(0.0, 120.0));
+        harness.get_by_label_contains("Number size").click();
+        harness.run();
+        harness.get_by_label("extra large").click();
+        harness.run();
+        assert_eq!(
+            harness.state().view.options.slice_label.size,
+            LabelSize::ExtraLarge
+        );
+    }
+
+    #[test]
+    fn the_menu_opens_the_save_dialog_and_the_dialog_keeps_its_choices() {
+        let (app, _) = clusterize_app();
+        let mut harness = run_frames(app, vec2(1300.0, 900.0));
+        let header = harness.get_all_by_value("Coronal").next().unwrap().rect();
+        right_click(&mut harness, header.center() + vec2(0.0, 100.0));
+        harness.get_by_label("Montage and more options…").click();
+        harness.run();
+        harness.run();
+        let dialog = harness
+            .state()
+            .export_dialog
+            .clone()
+            .expect("the dialog is open");
+        assert_eq!(dialog.plane, Plane::Coronal);
+        assert_eq!(dialog.count, 5); // y has 5 slices in clust+orig
+        // The three views, as a column: pick it in the dialog.
+        harness.get_by_label("The three views").click();
+        harness.run();
+        harness.get_by_label("one column").click();
+        harness.run();
+        let dialog = harness.state().export_dialog.clone().unwrap();
+        assert_eq!(dialog.what(), ExportWhat::Views(ViewsLayout::Column));
+        harness.get_by_label("Cancel").click();
+        harness.run();
+        assert!(harness.state().export_dialog.is_none());
+    }
+
+    // ---- Dropdowns: filter, recent, Graph datasets ----
+
+    fn app_with_many_datasets() -> (App, crate::testutil::TempDir) {
+        let dir = crate::testutil::TempDir::new("many");
+        for n in 0..15 {
+            std::fs::write(dir.path().join(format!("filler{n:02}.nii")), b"x").unwrap();
+        }
+        std::fs::write(dir.path().join("zz_target.nii"), b"x").unwrap();
+        let mut app = App::new(
+            prefs(ThemeChoice::Dark, CanvasBackground::Black),
+            &[],
+            false,
+        );
+        app.add_folder(dir.path());
+        (app, dir)
+    }
+
+    #[test]
+    fn clicking_and_typing_in_the_filter_box_keeps_the_dropdown_open() {
+        use egui::accesskit::Role;
+        let (app, _dir) = app_with_many_datasets();
+        let mut harness = run_frames(app, vec2(1000.0, 900.0));
+        harness.get_by_value("choose a dataset").click();
+        harness.run();
+        assert!(harness.query_all_by_label("filler03.nii").next().is_some());
+        // Click in the filter box: the list must stay.
+        let filter = harness.get_by_role(Role::TextInput);
+        filter.click();
+        harness.run();
+        assert!(
+            harness.query_all_by_label("filler03.nii").next().is_some(),
+            "the dropdown closed when the filter box was clicked"
+        );
+        harness.get_by_role(Role::TextInput).type_text("zz_");
+        harness.run();
+        harness.run();
+        assert!(harness.query_all_by_label("zz_target.nii").next().is_some());
+        assert!(harness.query_all_by_label("filler03.nii").next().is_none());
+        // Choosing an entry closes the list and loads it (a fake file: it fails).
+        harness.get_by_label("zz_target.nii").click();
+        harness.run();
+        assert!(harness.query_all_by_label("zz_target.nii").next().is_none());
+    }
+
+    #[test]
+    fn datasets_chosen_before_are_offered_at_the_top_of_the_dropdowns() {
+        let mut app = App::new(
+            prefs(ThemeChoice::Dark, CanvasBackground::Black),
+            &[],
+            false,
+        );
+        let fx = fixtures_dir();
+        let load = |app: &mut App, name: &str, role| {
+            app.apply(vec![SessionAction::LoadDataset(fx.join(name), role)]);
+            app.poll_loads();
+        };
+        load(&mut app, "tiny2+orig", LoadRole::Underlay);
+        load(&mut app, "stat+orig", LoadRole::Overlay);
+        load(&mut app, "bold+orig", LoadRole::Underlay); // replaces tiny2
+        assert_eq!(
+            app.recents.list(RecentKind::Underlay),
+            [fx.join("bold+orig"), fx.join("tiny2+orig")]
+        );
+        assert_eq!(
+            app.recents.list(RecentKind::Overlay),
+            [fx.join("stat+orig")]
+        );
+        assert!(app.recents.list(RecentKind::Graph).is_empty());
+        // tiny2 is no longer in memory, so the underlay dropdown lists it under Recent.
+        let mut harness = run_frames(app, vec2(1000.0, 1000.0));
+        // The ULay combo is the last place the underlay's name is written as a value.
+        harness
+            .get_all_by_value("bold+orig")
+            .last()
+            .unwrap()
+            .click();
+        harness.run();
+        assert!(harness.query_all_by_label("tiny2+orig").next().is_some());
+        assert!(
+            harness.query_all_by_value("Recent").next().is_some()
+                || harness
+                    .query_all_by_label_contains("Recent")
+                    .next()
+                    .is_some()
+        );
+        // Choosing it reads it again and puts it back on top.
+        harness.get_by_label("tiny2+orig").click();
+        harness.run();
+        harness.run();
+        assert_eq!(
+            harness.state().session.underlay().unwrap().name,
+            "tiny2+orig"
+        );
+        assert_eq!(
+            harness.state().recents.list(RecentKind::Underlay)[0],
+            fx.join("tiny2+orig")
+        );
+    }
+
+    #[test]
+    fn recents_also_follow_datasets_chosen_from_those_already_loaded() {
+        let (mut app, _) = clusterize_app(); // clust+orig as underlay and overlay
+        let path = fixtures_dir().join("clust+orig");
+        let first = app.session.controller().underlay.unwrap();
+        app.apply(vec![SessionAction::SetUnderlay(first)]);
+        assert!(
+            app.recents
+                .list(RecentKind::Underlay)
+                .iter()
+                .any(|p| p.ends_with("clust+orig"))
+        );
+        let _ = path;
+    }
+
+    #[test]
+    fn the_graph_can_plot_any_dataset_and_fit_any_dataset_of_the_same_length() {
+        let mut app = App::new(
+            prefs(ThemeChoice::Dark, CanvasBackground::Black),
+            &[],
+            false,
+        );
+        let fx = fixtures_dir();
+        let load = |app: &mut App, name: &str, role| {
+            app.apply(vec![SessionAction::LoadDataset(fx.join(name), role)]);
+            app.poll_loads();
+        };
+        load(&mut app, "tiny2+orig", LoadRole::Underlay);
+        // A 4D dataset that is neither the underlay nor an overlay.
+        load(&mut app, "bold+orig", LoadRole::GraphSource);
+        let series = app.session.controller().series.clone();
+        let source = app.session.store.get(series.source.unwrap()).unwrap();
+        assert_eq!((source.name.as_str(), source.nvols), ("bold+orig", 40));
+        assert_eq!(app.session.underlay().unwrap().name, "tiny2+orig"); // untouched
+        assert!(app.session.overlay_layers().is_empty());
+        // A fit of another length is refused, and not kept in memory.
+        load(&mut app, "stat+orig", LoadRole::GraphFit);
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|e| e.contains("time points"))
+        );
+        assert!(app.session.controller().series.fit.is_none());
+        assert_eq!(app.session.store.iter().count(), 2);
+        // A fit with 40 time points is taken.
+        load(&mut app, "bold+orig", LoadRole::GraphFit);
+        assert!(app.session.controller().series.fit.is_some());
+        // A dataset with one time point cannot be plotted.
+        load(&mut app, "stat+orig", LoadRole::GraphSource);
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|e| e.contains("no time series"))
+        );
+        assert_eq!(app.recents.list(RecentKind::Graph).len(), 2);
+    }
+
     // ---- Folders and background loading ----
 
     fn fixtures_dir() -> PathBuf {
@@ -2081,6 +2777,96 @@ mod tests {
         );
         app.detect_processing(&[tmp.path().to_path_buf()], &[]);
         (app, tmp)
+    }
+
+    #[test]
+    fn hovering_a_traffic_light_shows_its_status_and_clicking_it_opens_the_details() {
+        let (app, _tmp) = app_with_run(true);
+        let mut harness = run_frames(app, vec2(1600.0, 900.0));
+        // A row of the rail is labelled "<step>, <health>"; its light is at the
+        // right end of the row.
+        let row = harness
+            .get_all_by_label_contains("Slice timing,")
+            .next()
+            .unwrap()
+            .rect();
+        let light = egui::pos2(row.right() - 12.0, row.center().y);
+        assert!(
+            harness
+                .query_all_by_label_contains("Click for every check")
+                .next()
+                .is_none()
+        );
+        harness.hover_at(light);
+        harness.run();
+        harness.run();
+        // The pop-up names the step and its state and invites a click.
+        assert!(
+            harness
+                .query_all_by_label_contains("Slice timing ·")
+                .next()
+                .is_some()
+        );
+        let invite = harness.get_by_label_contains("Click for every check");
+        assert!(!harness.state().rail.detail_open);
+        // Moving onto the pop-up keeps it open; clicking it opens the details.
+        harness.hover_at(invite.rect().center());
+        harness.run();
+        assert!(
+            harness
+                .query_all_by_label_contains("Click for every check")
+                .next()
+                .is_some()
+        );
+        harness
+            .get_by_label_contains("Click for every check")
+            .click();
+        harness.run();
+        harness.run();
+        assert!(harness.state().rail.detail_open);
+        assert!(
+            harness
+                .query_all_by_label_contains("Click for every check")
+                .next()
+                .is_none()
+        );
+        // The selected step is the one whose light was used.
+        let model = harness.state().processing.as_ref().unwrap();
+        assert!(model.selected.as_ref().is_some_and(|id| {
+            model
+                .run
+                .step(id)
+                .is_some_and(|s| s.label == "Slice timing")
+        }));
+    }
+
+    #[test]
+    fn the_status_popup_closes_when_the_pointer_leaves() {
+        let (app, _tmp) = app_with_run(true);
+        let mut harness = run_frames(app, vec2(1600.0, 900.0));
+        let row = harness
+            .get_all_by_label_contains("Alignment,")
+            .next()
+            .unwrap()
+            .rect();
+        harness.hover_at(egui::pos2(row.right() - 12.0, row.center().y));
+        harness.run();
+        harness.run();
+        assert!(
+            harness
+                .query_all_by_label_contains("Alignment ·")
+                .next()
+                .is_some()
+        );
+        harness.hover_at(egui::pos2(300.0, 600.0)); // over the controller
+        harness.run();
+        harness.run();
+        assert!(
+            harness
+                .query_all_by_label_contains("Click for every check")
+                .next()
+                .is_none()
+        );
     }
 
     #[test]

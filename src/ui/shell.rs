@@ -153,6 +153,7 @@ pub fn status_bar(
     error: Option<&str>,
     conventions: &str,
     loading: &[LoadingInfo],
+    notice: Option<&str>,
 ) {
     ui.horizontal(|ui| {
         if let Some(first) = loading.first() {
@@ -170,6 +171,8 @@ pub fn status_bar(
                 RichText::new(format!("Loading {}…{more}", loading_text(first)))
                     .color(theme.accent),
             );
+        } else if let Some(n) = notice.filter(|_| error.is_none()) {
+            ui.label(RichText::new(n).color(theme.good));
         } else if let Some(e) = error {
             ui.label(RichText::new(e).color(theme.error));
         } else if let Some(d) = current {

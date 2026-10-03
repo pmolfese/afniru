@@ -357,6 +357,8 @@ impl Session {
             Action::SaveClusters(_)
             | Action::LoadStim
             | Action::LoadDataset(..)
+            | Action::Export(_)
+            | Action::ExportDialog(_)
             | Action::ScanFolder(_)
             | Action::CloseFolder(_)
             | Action::CancelLoad(_) => {} // the app does the file work

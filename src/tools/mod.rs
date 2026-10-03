@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::data::Dataset;
 use crate::geom::{CoordOrient, Plane};
 use crate::loader::{FolderListing, LoadingInfo};
+use crate::recent::Recents;
 use crate::render::overlay::OverlayFrames;
 use crate::session::{Action, ControllerState, LayerId, OverlayLayer, Session};
 use crate::ui::theme::Theme;
@@ -159,6 +160,8 @@ pub struct ToolContext<'a> {
     pub coord_orient: CoordOrient,
     /// The underlay's value at the crosshair.
     pub value: Option<f32>,
+    /// The datasets chosen recently, for the dropdowns.
+    pub recents: &'a Recents,
     /// The datasets being read in the background.
     pub loading: &'a [LoadingInfo],
     /// The folders whose datasets can be picked.

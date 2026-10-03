@@ -1,6 +1,7 @@
 //! State shared by the cards of the view area: layout, options, the cursor.
 
 use crate::prefs::Prefs;
+use crate::render::label::SliceLabel;
 
 /// How the cards are arranged in the view area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -24,6 +25,9 @@ pub struct ViewOptions {
     /// Neurological display (subject's left on screen left) instead of
     /// radiological.
     pub left_is_left: bool,
+    /// The slice number on each image: shown or not, in which corner, how
+    /// big. One setting for all three planes.
+    pub slice_label: SliceLabel,
 }
 
 impl ViewOptions {
@@ -33,6 +37,7 @@ impl ViewOptions {
             layout: Layout::default(),
             crosshair: true,
             left_is_left: prefs.left_is_left,
+            slice_label: prefs.slice_label,
         }
     }
 }

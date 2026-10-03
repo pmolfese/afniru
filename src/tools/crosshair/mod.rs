@@ -137,6 +137,7 @@ mod tests {
     use super::*;
     use crate::data::synthetic;
     use crate::geom::CoordOrient;
+    use crate::recent::Recents;
     use crate::session::Session;
     use crate::ui::theme::Theme;
 
@@ -155,6 +156,7 @@ mod tests {
             coord_orient: CoordOrient::Rai,
             value: None,
             loading: &[],
+            recents: &Recents::default(),
             folders: &[],
             overlays: Vec::new(),
         };

@@ -16,11 +16,13 @@ use crate::data::Dataset;
 use crate::geom::Plane;
 use crate::geom::coords::{ijk_to_ras, magnitude_and_letter};
 use crate::render::compose::{self, Window};
+use crate::render::export::{self, ExportOptions, ExportWhat, Rgba8Image, ViewsLayout};
+use crate::render::label::{Corner, LabelSize, SliceLabel};
 use crate::render::layers::{self, LayerInput};
 use crate::render::overlay::{OverlayFrames, contrast_outline, outline_only};
 use crate::render::slice::{self, PlaneMap, Slice};
 use crate::session::store::DatasetId;
-use crate::session::{Cursor, OverlayLayer};
+use crate::session::{Action as SessionAction, Cursor, OverlayLayer};
 
 /// Radius of the gap left in the crosshair around the focus point, in points.
 const GAP: f32 = 7.0;
@@ -35,6 +37,15 @@ struct TexKey {
     /// The visible layers' ids and display keys, combined; 0 when no overlay
     /// is drawn.
     overlay: u64,
+}
+
+/// What a card's right-click menu asked for.
+#[derive(Debug, Default)]
+pub struct CardEvents {
+    /// A new slice-number setting (for all three views).
+    pub label: Option<SliceLabel>,
+    /// Saving images, and the like, for the app to carry out.
+    pub actions: Vec<SessionAction>,
 }
 
 /// What every card needs to draw, shared by the three planes.
@@ -174,8 +185,10 @@ impl PlaneCard {
     }
 
     /// Draw the card filling `ui`; clicking or dragging on the image moves
-    /// the crosshair.
-    pub fn ui(&mut self, ui: &mut Ui, cx: &CardContext, cur: &mut Cursor) {
+    /// the crosshair, and right-clicking opens the menu (slice number, saving
+    /// images). Returns what the menu asked for.
+    pub fn ui(&mut self, ui: &mut Ui, cx: &CardContext, cur: &mut Cursor) -> CardEvents {
+        let mut events = CardEvents::default();
         let ds = cx.ds;
         let left_is_left = cx.options.left_is_left;
         let map = PlaneMap::new(ds.dims, &ds.orient, self.plane, left_is_left);
@@ -191,6 +204,7 @@ impl PlaneCard {
         if response.hovered() || response.dragged() {
             cur.active = self.plane;
         }
+        response.context_menu(|ui| self.menu(ui, cx, &mut events));
 
         if let Some(s) = slice::extract(
             cx.frame,
@@ -213,6 +227,63 @@ impl PlaneCard {
 
         ui.add_space(4.0);
         self.footer(ui, cx, cur, &map);
+        events
+    }
+
+    /// The right-click menu: the slice number (for all three views) and
+    /// saving images.
+    fn menu(&self, ui: &mut Ui, cx: &CardContext, events: &mut CardEvents) {
+        let mut label = cx.options.slice_label;
+        ui.checkbox(&mut label.show, "Slice number")
+            .on_hover_text("Draw the slice number on every view");
+        ui.menu_button("Number position", |ui| {
+            for corner in Corner::ALL {
+                if ui
+                    .selectable_label(label.corner == corner, corner.label())
+                    .clicked()
+                {
+                    label.corner = corner;
+                    label.show = true;
+                    ui.close();
+                }
+            }
+        });
+        ui.menu_button("Number size", |ui| {
+            for size in LabelSize::ALL {
+                if ui
+                    .selectable_label(label.size == size, size.label())
+                    .clicked()
+                {
+                    label.size = size;
+                    label.show = true;
+                    ui.close();
+                }
+            }
+        });
+        if label != cx.options.slice_label {
+            events.label = Some(label);
+        }
+        ui.separator();
+        if ui.button("Save this slice…").clicked() {
+            events
+                .actions
+                .push(SessionAction::Export(ExportWhat::Slice(self.plane)));
+            ui.close();
+        }
+        ui.menu_button("Save the three views", |ui| {
+            for layout in ViewsLayout::ALL {
+                if ui.button(layout.label()).clicked() {
+                    events
+                        .actions
+                        .push(SessionAction::Export(ExportWhat::Views(layout)));
+                    ui.close();
+                }
+            }
+        });
+        if ui.button("Montage and more options…").clicked() {
+            events.actions.push(SessionAction::ExportDialog(self.plane));
+            ui.close();
+        }
     }
 
     fn header(&self, ui: &mut Ui, cx: &CardContext, cur: &Cursor) {
@@ -338,6 +409,10 @@ impl PlaneCard {
             font,
             ink,
         );
+        let label = cx.options.slice_label;
+        if label.show {
+            slice_number(&painter, rect, key_index(cur, map), &label);
+        }
         scale_bar(&painter, canvas, fit, ink);
         painter.text(
             pos2(canvas.right() - 8.0, canvas.bottom() - 8.0),
@@ -434,6 +509,90 @@ fn slice_coordinate(ds: &Dataset, plane: Plane, ijk: [usize; 3]) -> String {
     let axis = plane.fixed_ras_axis();
     let (mag, letter) = magnitude_and_letter(ras)[axis];
     format!("{} = {:.1} mm {}", ["x", "y", "z"][axis], mag, letter)
+}
+
+/// Slice `index` of `plane` as saved-image pixels: the underlay and every
+/// visible overlay layer, made square-pixeled at `px_per_mm`, with the slice
+/// number, the crosshair and the orientation letters as `opts` asks.
+#[allow(clippy::too_many_arguments)]
+pub fn export_tile(
+    cx: &CardContext,
+    plane: Plane,
+    index: usize,
+    cursor: Option<[usize; 3]>,
+    opts: &ExportOptions,
+    px_per_mm: f64,
+    letters: bool,
+    background: [u8; 3],
+) -> Option<Rgba8Image> {
+    let ds = cx.ds;
+    let left_is_left = cx.options.left_is_left;
+    let map = PlaneMap::new(ds.dims, &ds.orient, plane, left_is_left);
+    let s = slice::extract(
+        cx.frame,
+        ds.dims,
+        ds.voxel_mm,
+        &ds.orient,
+        plane,
+        index,
+        left_is_left,
+    )?;
+    let layers = overlay_planes(cx, plane, index, left_is_left);
+    let rgba = compose::compose_rgba(&s, cx.window, &layers);
+    let voxels = Rgba8Image::from_rgba(s.width, s.height, rgba);
+    let out_w = ((s.width as f64 * s.pixel_mm[0] * px_per_mm).round() as usize).max(1);
+    let out_h = ((s.height as f64 * s.pixel_mm[1] * px_per_mm).round() as usize).max(1);
+    let mut img = voxels.resized(out_w, out_h);
+    if let Some(ijk) = cursor {
+        let (col, row) = map.pixel(ijk);
+        let focus = (
+            ((col as f64 + 0.5) * out_w as f64 / s.width as f64) as i64,
+            ((row as f64 + 0.5) * out_h as f64 / s.height as f64) as i64,
+        );
+        let (h, v) = plane.screen_axes(left_is_left);
+        let rgb = |c: Color32| [c.r(), c.g(), c.b()];
+        export::draw_crosshair(
+            &mut img,
+            focus,
+            rgb(plane_color(plane_fixed_on(h.ras_axis))),
+            rgb(plane_color(plane_fixed_on(v.ras_axis))),
+            i64::from(opts.zoom) * 2,
+            i64::from((opts.zoom / 4).max(1)),
+        );
+    }
+    export::draw_slice_number(&mut img, index, &opts.label);
+    if letters {
+        img = export::with_letters(&img, [s.left, s.right, s.top, s.bottom], background);
+    }
+    Some(img)
+}
+
+/// The slice index shown in `map`'s plane.
+fn key_index(cur: &Cursor, map: &PlaneMap) -> usize {
+    cur.ijk[map.fixed_axis]
+}
+
+/// The slice number in its corner of the image, white with a dark shadow so it
+/// reads on any picture.
+fn slice_number(painter: &egui::Painter, image: Rect, number: usize, label: &SliceLabel) {
+    let font = FontId::monospace(label.size.points());
+    let m = 6.0;
+    let (anchor, align) = match label.corner {
+        Corner::TopLeft => (image.left_top() + vec2(m, m), Align2::LEFT_TOP),
+        Corner::TopRight => (image.right_top() + vec2(-m, m), Align2::RIGHT_TOP),
+        Corner::BottomLeft => (image.left_bottom() + vec2(m, -m), Align2::LEFT_BOTTOM),
+        Corner::BottomRight => (image.right_bottom() + vec2(-m, -m), Align2::RIGHT_BOTTOM),
+    };
+    let text = number.to_string();
+    for d in [
+        vec2(1.0, 1.0),
+        vec2(-1.0, 1.0),
+        vec2(1.0, -1.0),
+        vec2(-1.0, -1.0),
+    ] {
+        painter.text(anchor + d, align, &text, font.clone(), Color32::BLACK);
+    }
+    painter.text(anchor, align, text, font, Color32::WHITE);
 }
 
 /// A scale bar of a round length (1, 2, 5 × 10ⁿ mm) near 80 px wide, bottom
@@ -583,6 +742,7 @@ mod tests {
                 layout: Default::default(),
                 crosshair: false,
                 left_is_left: false,
+                slice_label: SliceLabel::default(),
             },
             sub_frames: &HashMap::new(),
             overlays: vec![

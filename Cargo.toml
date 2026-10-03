@@ -9,6 +9,8 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 afni-core = { git = "https://github.com/pmolfese/afni-core", branch = "main" }
 afni-io = { path = "../afni-io" }
+# Smooth text in saved images (the font egui already carries).
+ab_glyph = "0.2"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 # Versions track sumaru (egui 0.36.2 / wgpu 30). eframe's default features
@@ -18,6 +20,8 @@ egui = "0.36.2"
 egui_plot = "0.37"
 egui-phosphor = { version = "0.14", default-features = false, features = ["regular"] }
 glam = "0.33"
+# PNG files for saved slices and montages (the version eframe already uses).
+image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = "0.17"
 serde = { version = "1", features = ["derive"] }
 

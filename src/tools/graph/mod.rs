@@ -8,6 +8,7 @@ pub mod series;
 
 use egui::{ComboBox, DragValue, RichText, Ui};
 
+use super::datasets::{Picks, dataset_combo};
 use super::{Instance, Tool, ToolContext};
 use crate::session::Action;
 use crate::session::series::{Detrend, SeriesChange};
@@ -34,32 +35,25 @@ impl Tool for GraphTool {
         let (name, len) = Self::plotted(cx).unwrap_or(("none", 0));
 
         egui::Grid::new("graph_grid").num_columns(2).show(ui, |ui| {
+            // Any dataset can be plotted (or be the fit), not only the underlay
+            // and the overlays: the dropdowns list loaded, recent and folder
+            // datasets, and read the chosen one if it is not loaded.
             ui.label(RichText::new("Dataset").color(theme.text_dim));
-            ComboBox::from_id_salt("graph_source")
-                .width(ui.available_width())
-                .selected_text(if s.source.is_none() {
-                    format!("ULay · {name}")
-                } else {
-                    name.to_string()
-                })
-                .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_label(s.source.is_none(), "ULay (the underlay)")
-                        .clicked()
-                    {
-                        actions.push(change(SeriesChange::Source(None)));
-                    }
-                    for (id, d) in cx.session.store.iter() {
-                        if d.nvols > 1
-                            && ui
-                                .selectable_label(s.source == Some(id), &d.name)
-                                .on_hover_text(format!("{} time points", d.nvols))
-                                .clicked()
-                        {
-                            actions.push(change(SeriesChange::Source(Some(id))));
-                        }
-                    }
-                });
+            let source_name = if s.source.is_none() {
+                format!("ULay · {name}")
+            } else {
+                name.to_string()
+            };
+            dataset_combo(
+                ui,
+                cx,
+                "graph_source",
+                ui.available_width(),
+                &source_name,
+                s.source,
+                &Picks::graph_source(s.source),
+                &mut actions,
+            );
             ui.end_row();
 
             ui.label(RichText::new("Fit").color(theme.text_dim));
@@ -67,23 +61,16 @@ impl Tool for GraphTool {
                 .fit
                 .and_then(|id| cx.session.store.get(id))
                 .map_or("none", |d| d.name.as_str());
-            ComboBox::from_id_salt("graph_fit")
-                .width(ui.available_width())
-                .selected_text(fit_name)
-                .show_ui(ui, |ui| {
-                    if ui.selectable_label(s.fit.is_none(), "none").clicked() {
-                        actions.push(change(SeriesChange::Fit(None)));
-                    }
-                    for (id, d) in cx.session.store.iter() {
-                        // A fit needs a point for every point of the series.
-                        if d.nvols == len
-                            && len > 1
-                            && ui.selectable_label(s.fit == Some(id), &d.name).clicked()
-                        {
-                            actions.push(change(SeriesChange::Fit(Some(id))));
-                        }
-                    }
-                });
+            dataset_combo(
+                ui,
+                cx,
+                "graph_fit",
+                ui.available_width(),
+                fit_name,
+                s.fit,
+                &Picks::graph_fit(len, s.fit),
+                &mut actions,
+            );
             ui.end_row();
 
             ui.label(RichText::new("Matrix").color(theme.text_dim));
