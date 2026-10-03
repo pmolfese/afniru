@@ -24,7 +24,8 @@ use crate::ui::fonts;
 use crate::ui::processing_rail::{ProcessingRail, RailEvent};
 use crate::ui::shell::{self, Action};
 use crate::ui::theme::Theme;
-use crate::ui::view_area::{OverlayTarget, Target, ViewArea};
+use crate::ui::view_area::{OverlayTarget, Target, ViewArea, ZoomState};
+use crate::ui::view_state::ViewOptions;
 
 /// Everything afniru holds while running.
 pub struct App {
@@ -33,18 +34,31 @@ pub struct App {
     session: Session,
     /// Last load error, shown in the status bar until the next load.
     error: Option<String>,
-    /// The view area: layout, window, texture caches.
-    view: ViewArea,
+    /// One view area (layout, window, texture caches) for each controller.
+    views: Vec<ViewArea>,
+    /// Layout, crosshair, orientation and slice-number options, shared by all
+    /// the views (copied into each before it is drawn).
+    options: ViewOptions,
+    /// Show controllers A and B side by side.
+    compare: bool,
+    /// Each controller's crosshair as of the last frame (to see which moved).
+    last_cursors: Vec<[usize; 3]>,
+    /// The generation each view was last reset for.
+    view_generations: Vec<u64>,
+    /// Each view's zoom and pan as of the last frame (to see which changed).
+    last_zooms: Vec<ZoomState>,
     /// The controller sidebar: workspaces, rail state.
     controller: ControllerUi,
-    /// The clusters of the layers Clusterize is hooked under.
-    clusters: Engine,
+    /// The clusters of the layers Clusterize is hooked under, per controller.
+    clusters: Vec<Engine>,
     /// The look of saved images (size, letters, crosshair).
     export_options: ExportOptions,
     /// The "Save images" dialog, when open.
     export_dialog: Option<ExportDialog>,
     /// A message for the status bar that is not an error (what was saved).
     notice: Option<String>,
+    /// List the subfolders of a folder too (`afniru -R`).
+    recursive_listing: bool,
     /// The datasets chosen recently, for the dropdowns (kept between runs).
     recents: Recents,
     /// Datasets being read (and folders being listed) in the background.
@@ -78,15 +92,21 @@ impl App {
         let mut session = Session::new();
         session.colorscale = prefs.colorscale;
         let mut app = Self {
-            view: ViewArea::new(&prefs),
+            views: vec![ViewArea::new(&prefs)],
+            options: ViewOptions::from_prefs(&prefs),
+            compare: false,
+            last_cursors: vec![[0; 3]],
+            view_generations: vec![u64::MAX],
+            last_zooms: vec![ZoomState::default()],
             prefs,
             session,
             error: None,
             controller: ControllerUi::default(),
-            clusters: Engine::default(),
+            clusters: vec![Engine::default()],
             export_options: ExportOptions::default(),
             export_dialog: None,
             notice: None,
+            recursive_listing: false,
             recents: Recents::default(),
             loader: Loader::default(),
             folders: Vec::new(),
@@ -269,11 +289,98 @@ impl App {
         }
     }
 
+    /// Keep one view and one cluster engine per controller.
+    fn ensure_controllers(&mut self) {
+        let n = self.session.controllers.len();
+        while self.views.len() < n {
+            let k = self.views.len();
+            self.views.push(ViewArea::new(&self.prefs));
+            self.clusters.push(Engine::default());
+            self.last_cursors
+                .push(self.session.controllers[k].cursor.ijk);
+            self.view_generations.push(u64::MAX);
+            self.last_zooms.push(self.views[k].zoom_state());
+        }
+        self.views.truncate(n);
+        self.clusters.truncate(n);
+        self.last_cursors.truncate(n);
+        self.view_generations.truncate(n);
+        self.last_zooms.truncate(n);
+        self.reset_changed_views();
+    }
+
+    /// Reset the views of the controllers whose underlay changed.
+    fn reset_changed_views(&mut self) {
+        for (k, c) in self.session.controllers.iter().enumerate() {
+            if let Some(seen) = self.view_generations.get_mut(k)
+                && *seen != c.generation
+            {
+                *seen = c.generation;
+                if let Some(v) = self.views.get_mut(k) {
+                    v.reset();
+                }
+            }
+        }
+    }
+
+    /// The two controllers shown side by side: A and, next to it, B (or the
+    /// active one when it is a later controller).
+    fn compared_pair(&self) -> (usize, usize) {
+        let a = self.session.active;
+        (0, if a == 0 { 1 } else { a })
+    }
+
+    /// Everything the views need of controller `k`, owned.
+    fn target_data(&self, k: usize) -> Option<TargetData> {
+        let c = self.session.controllers.get(k)?;
+        let ds = self.session.store.get(c.underlay?)?.clone();
+        let layers = self.session.overlay_layers_of(k);
+        let keeps = layers
+            .iter()
+            .map(|(l, _)| self.clusters.get(k).and_then(|e| e.keep(l)))
+            .collect();
+        Some(TargetData {
+            ds,
+            sub_brick: c.underlay_sub_brick,
+            generation: c.generation,
+            layers,
+            keeps,
+            series: c.series.clone(),
+        })
+    }
+
+    /// After the views: if a controller's crosshair moved, move the others'
+    /// to the same place (when linked); remember where each now is.
+    fn sync_links(&mut self) {
+        let n = self.session.controllers.len().min(self.last_cursors.len());
+        if let Some(k) =
+            (0..n).find(|&k| self.session.controllers[k].cursor.ijk != self.last_cursors[k])
+        {
+            self.session.sync_crosshair(k);
+        }
+        for k in 0..n {
+            self.last_cursors[k] = self.session.controllers[k].cursor.ijk;
+        }
+        // Zoom and pan follow the same way.
+        let n = n.min(self.views.len()).min(self.last_zooms.len());
+        if self.session.links.zoom
+            && let Some(k) = (0..n).find(|&k| self.views[k].zoom_state() != self.last_zooms[k])
+        {
+            let state = self.views[k].zoom_state();
+            for j in (0..n).filter(|&j| j != k) {
+                self.views[j].set_zoom_state(state);
+            }
+        }
+        for k in 0..n {
+            self.last_zooms[k] = self.views[k].zoom_state();
+        }
+    }
+
     /// Make `d` the underlay.
     fn add(&mut self, d: Dataset) {
         self.error = None;
         self.session.add_dataset(d);
-        self.view.reset();
+        self.reset_changed_views();
     }
 
     /// Open `path` as the underlay (in the background).
@@ -380,6 +487,11 @@ impl App {
         }
     }
 
+    /// Make the folders listed from now on include their subfolders.
+    pub fn set_recursive_listing(&mut self, on: bool) {
+        self.recursive_listing = on;
+    }
+
     /// List the datasets of `dir` in the Datasets card (reading it in the
     /// background). A folder already listed is read again.
     pub fn add_folder(&mut self, dir: &Path) {
@@ -389,11 +501,18 @@ impl App {
         if !self.folders.iter().any(|f| f.dir == dir) {
             self.folders.push(FolderListing {
                 dir: dir.to_path_buf(),
+                recursive: self.recursive_listing,
                 entries: None,
                 error: None,
             });
         }
-        self.loader.scan(dir);
+        // A folder already listed is read again the way it was first.
+        let recursive = self
+            .folders
+            .iter()
+            .find(|f| f.dir == dir)
+            .is_some_and(|f| f.recursive);
+        self.loader.scan(dir, recursive);
         self.poll_loads();
     }
 
@@ -403,9 +522,20 @@ impl App {
         if !actions.is_empty() {
             self.notice = None; // what was saved is news only until the next action
         }
-        let before = self.session.generation;
         for a in actions {
             match a {
+                SessionAction::RemoveController(i)
+                    if self.session.controllers.len() > 1 && i < self.views.len() =>
+                {
+                    // Its view and clusters go with it.
+                    self.views.remove(i);
+                    self.clusters.remove(i);
+                    self.last_cursors.remove(i);
+                    self.view_generations.remove(i);
+                    self.last_zooms.remove(i);
+                    self.session.apply(SessionAction::RemoveController(i));
+                    continue;
+                }
                 SessionAction::SaveClusters(id) => {
                     self.save_clusters(id);
                     continue;
@@ -453,17 +583,23 @@ impl App {
                 }
                 _ => {}
             }
+            // Cloning to compare switches the view area to the compare layout.
+            let cloned = matches!(a, SessionAction::CloneController { .. });
             self.session.apply(a);
+            if cloned {
+                self.compare = true;
+            }
         }
-        if self.session.generation != before {
-            self.view.reset();
+        if self.session.controllers.len() < 2 {
+            self.compare = false;
         }
+        self.ensure_controllers();
     }
 
     /// The saved-image options, with the slice number as shown on screen.
     fn current_export_options(&self) -> ExportOptions {
         ExportOptions {
-            label: self.view.options.slice_label,
+            label: self.options.slice_label,
             ..self.export_options
         }
     }
@@ -495,30 +631,15 @@ impl App {
         what: ExportWhat,
         opts: &ExportOptions,
     ) -> Result<Vec<(String, Rgba8Image)>, String> {
-        let Some(underlay) = self.session.underlay().cloned() else {
+        let active = self.session.active;
+        let Some(data) = self.target_data(active) else {
             return Err("there is nothing to save: no dataset".into());
         };
-        let layers = self.session.overlay_layers();
-        let series = self.session.controller().series.clone();
         let cursor = self.session.controller().cursor;
         let background = self.export_background();
-        let target = Target {
-            ds: &underlay,
-            sub_brick: self.session.controller().underlay_sub_brick,
-            generation: self.session.generation,
-            overlays: layers
-                .iter()
-                .map(|(layer, ds)| OverlayTarget {
-                    layer,
-                    ds: ds.as_ref(),
-                    keep: self.clusters.keep(layer),
-                })
-                .collect(),
-            store: &self.session.store,
-            series: &series,
-        };
-        self.view
-            .export_images(&target, &cursor, what, opts, background, &Theme::dark())
+        self.views[active].options = self.options;
+        let target = data.target(&self.session.store);
+        self.views[active].export_images(&target, &cursor, what, opts, background, &Theme::dark())
     }
 
     /// Ask for a file name and save what `what` asks for. Several pictures
@@ -528,6 +649,7 @@ impl App {
             ExportWhat::Slice(p) => format!("{}.png", p.name().to_lowercase()),
             ExportWhat::Views(_) => "views.png".to_string(),
             ExportWhat::Montage(m) => format!("montage_{}.png", m.plane.name().to_lowercase()),
+            ExportWhat::Graph => "graph.png".to_string(),
         };
         let Some(path) = rfd::FileDialog::new()
             .set_title("Save image")
@@ -584,7 +706,7 @@ impl App {
                 };
                 // The slice number is the views' setting; the dialog's box is
                 // a shortcut for it.
-                self.view.options.slice_label.show = opts.label.show;
+                self.options.slice_label.show = opts.label.show;
                 self.export_dialog = None;
                 self.export(what, &opts);
             }
@@ -628,9 +750,15 @@ impl App {
 
     /// The cluster table of layer `id` as text, if it has clusters.
     fn cluster_report(&self, id: crate::session::LayerId) -> Option<String> {
-        let layer = self.session.layer(id)?;
+        let layer = self.session.layer_any(id)?;
         let settings = layer.cluster?;
-        let out = self.clusters.get(id)?.result.as_ref().ok()?;
+        let out = self
+            .clusters
+            .iter()
+            .find_map(|e| e.get(id))?
+            .result
+            .as_ref()
+            .ok()?;
         let name = &self.session.store.get(layer.dataset)?.name;
         Some(crate::tools::clusterize::compute::report_text(
             out,
@@ -715,54 +843,86 @@ impl App {
         egui::Panel::top("menu").show(ui, |ui| {
             action = shell::menu_bar(ui);
         });
+        self.ensure_controllers();
+        let active = self.session.active;
+        let count = self.session.controllers.len();
+        let pair = self.compared_pair();
+        let mut multi = shell::Multi {
+            count,
+            compare: &mut self.compare,
+            links: self.session.links,
+            pair,
+            differences: if count >= 2 {
+                self.session.differences(pair.0, pair.1)
+            } else {
+                Vec::new()
+            },
+            actions: Vec::new(),
+        };
         egui::Panel::top("toolbar").show(ui, |ui| {
-            shell::toolbar(ui, &theme, underlay.as_deref(), &mut self.view.options);
+            shell::toolbar(
+                ui,
+                &theme,
+                underlay.as_deref(),
+                &mut self.options,
+                Some(&mut multi),
+            );
         });
+        let toolbar_actions = std::mem::take(&mut multi.actions);
         egui::Panel::bottom("status").show(ui, |ui| {
             shell::status_bar(
                 ui,
                 &theme,
                 underlay.as_deref(),
                 self.error.as_deref(),
-                &self.view.conventions(underlay.as_deref()),
+                &self.views[active].conventions(underlay.as_deref()),
                 &self.loader.loading(),
                 self.notice.as_deref(),
             );
         });
 
         // Clusters follow the layers' thresholds; they wait for the mouse to
-        // be released so that dragging a threshold stays smooth.
-        if let Some(under) = &underlay {
-            let settled = !ctx.input(|i| i.pointer.any_down());
-            let view = &self.view;
-            let wake: Wake = {
-                let ctx = ctx.clone();
-                std::sync::Arc::new(move || ctx.request_repaint())
+        // be released so that dragging a threshold stays smooth. Every
+        // controller has its own.
+        let settled = !ctx.input(|i| i.pointer.any_down());
+        let wake: Wake = {
+            let ctx = ctx.clone();
+            std::sync::Arc::new(move || ctx.request_repaint())
+        };
+        for k in 0..count {
+            let Some(under) = self.session.controllers[k]
+                .underlay
+                .and_then(|id| self.session.store.get(id))
+                .cloned()
+            else {
+                continue;
             };
-            let waiting = self.clusters.update(
+            let view = &self.views[k];
+            let waiting = self.clusters[k].update(
                 &self.session,
-                under,
+                k,
+                &under,
                 settled,
-                &|layers, id| view.passed_everywhere(under, layers, id),
+                &|layers, id| view.passed_everywhere(&under, layers, id),
                 &wake,
             );
             if waiting {
                 ctx.request_repaint();
-            } else if self.clusters.busy() {
+            } else if self.clusters[k].busy() {
                 // The worker wakes the interface when done; this is a net.
                 ctx.request_repaint_after(std::time::Duration::from_millis(250));
             }
         }
 
         // The controller (left), then the views.
-        let actions = {
+        let mut actions = {
             let controller = self.session.controller();
             let loading = self.loader.loading();
             let layers = self.session.overlay_layers();
             let plain: Vec<_> = layers.iter().map(|(l, _)| l.clone()).collect();
             let probes = underlay
                 .as_deref()
-                .map(|d| self.view.probe(d, &plain, &controller.cursor))
+                .map(|d| self.views[active].probe(d, &plain, &controller.cursor))
                 .unwrap_or_default();
             let cx = ToolContext {
                 theme: &theme,
@@ -772,7 +932,7 @@ impl App {
                 coord_orient: self.prefs.coord_orient,
                 value: underlay
                     .as_deref()
-                    .and_then(|d| self.view.value_at(d, &controller.cursor)),
+                    .and_then(|d| self.views[active].value_at(d, &controller.cursor)),
                 loading: &loading,
                 recents: &self.recents,
                 folders: &self.folders,
@@ -784,16 +944,17 @@ impl App {
                         dataset: dataset.as_ref(),
                         drawn: probes.get(n).and_then(|p| p.drawn),
                         problem: probes.get(n).and_then(|p| p.problem.clone()),
-                        frames: self.view.overlay_frames(layer.id),
-                        cluster: self.clusters.get(layer.id),
+                        frames: self.views[active].overlay_frames(layer.id),
+                        cluster: self.clusters[active].get(layer.id),
                         values: underlay.as_deref().and_then(|d| {
-                            self.view.overlay_values_at(layer.id, d, &controller.cursor)
+                            self.views[active].overlay_values_at(layer.id, d, &controller.cursor)
                         }),
                     })
                     .collect(),
             };
             self.controller.panel(ui, &cx)
         };
+        actions.extend(toolbar_actions);
         self.apply(actions);
 
         // The Processing rail (right), when there is a run.
@@ -804,68 +965,186 @@ impl App {
         self.handle_rail(rail_events);
 
         // Cards may have changed the underlay.
+        self.ensure_controllers();
+        let active = self.session.active;
         let underlay = self.session.underlay().cloned();
-        let sub_brick = self.session.controller().underlay_sub_brick;
-        let generation = self.session.generation;
-        let layers = self.session.overlay_layers();
-        let series = self.session.controller().series.clone();
-        let overlay_targets = || -> Vec<OverlayTarget> {
-            layers
-                .iter()
-                .map(|(layer, ds)| OverlayTarget {
-                    layer,
-                    ds: ds.as_ref(),
-                    keep: self.clusters.keep(layer),
-                })
-                .collect()
-        };
         if let Some(ds) = &underlay {
-            self.view
-                .handle_keys(&ctx, ds, &mut self.session.controller_mut().cursor);
-            let target = Target {
-                ds,
-                sub_brick,
-                generation,
-                overlays: overlay_targets(),
-                store: &self.session.store,
-                series: &series,
-            };
-            let cursor = self.session.controller().cursor;
-            egui::Panel::bottom("readout").show(ui, |ui| {
-                self.view.readout(ui, &theme, &target, &cursor);
-            });
+            self.views[active].handle_keys(&ctx, ds, &mut self.session.controllers[active].cursor);
+            if let Some(data) = self.target_data(active) {
+                let target = data.target(&self.session.store);
+                let cursor = self.session.controller().cursor;
+                egui::Panel::bottom("readout").show(ui, |ui| {
+                    self.views[active].readout(ui, &theme, &target, &cursor);
+                });
+            }
         }
         let mut graph_actions = Vec::new();
         let background = egui::Frame::new().fill(theme.bg).inner_margin(8);
+        let pair = self.compared_pair();
+        let comparing = self.compare && self.session.controllers.len() >= 2;
+        let pressed = ctx.input(|i| {
+            i.pointer
+                .primary_pressed()
+                .then(|| i.pointer.interact_pos())
+                .flatten()
+        });
         egui::CentralPanel::default()
             .frame(background)
-            .show(ui, |ui| match &underlay {
-                Some(ds) => {
-                    let target = Target {
-                        ds,
-                        sub_brick,
-                        generation,
-                        overlays: overlay_targets(),
-                        store: &self.session.store,
-                        series: &series,
+            .show(ui, |ui| {
+                let shown: Vec<usize> = if comparing {
+                    vec![pair.0, pair.1]
+                } else {
+                    vec![active]
+                };
+                let area = ui.available_rect_before_wrap();
+                for (n, &k) in shown.iter().enumerate() {
+                    let rect = half(area, n, shown.len());
+                    // Compare mode: a strip above each half names its controller.
+                    let (strip, body) = if comparing {
+                        controller_strip(ui, &theme, rect, k, active, &self.session)
+                    } else {
+                        (None, rect)
                     };
+                    let _ = strip;
+                    let Some(data) = self.target_data(k) else {
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
+                            ui.centered_and_justified(|ui| {
+                                ui.label(egui::RichText::new("no dataset").color(theme.text_faint));
+                            });
+                        });
+                        continue;
+                    };
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body));
+                    self.views[k].options = self.options;
+                    let target = data.target(&self.session.store);
                     // Disjoint fields: the store is read while the cursor moves.
-                    let active = self.session.active;
-                    let cursor = &mut self.session.controllers[active].cursor;
-                    self.view.ui(ui, &theme, &target, cursor);
-                    graph_actions = self.view.take_actions();
+                    let cursor = &mut self.session.controllers[k].cursor;
+                    self.views[k].ui(&mut child, &theme, &target, cursor);
+                    self.options = self.views[k].options;
+                    let acts = self.views[k].take_actions();
+                    // A menu used in the other controller's half acts on it.
+                    if k != active && !acts.is_empty() {
+                        graph_actions.push(SessionAction::SelectController(k));
+                    }
+                    graph_actions.extend(acts);
+                    if comparing && k != active && pressed.is_some_and(|p| body.contains(p)) {
+                        graph_actions.push(SessionAction::SelectController(k));
+                    }
+                    if comparing && k == active && pressed.is_some_and(|p| body.contains(p)) {
+                        // Already active.
+                    }
                 }
-                None => {
+                if shown.is_empty() {
                     ui.centered_and_justified(|ui| {
                         ui.label(egui::RichText::new("no dataset").color(theme.text_faint));
                     });
                 }
             });
+        self.sync_links();
         self.apply(graph_actions);
         self.view_dialog(&ctx, &theme);
         self.export_dialog(&ctx, &theme);
         action
     }
+}
+
+/// Everything a view needs of one controller, owned so that the session can
+/// still be borrowed (for the crosshair) while the view is drawn.
+struct TargetData {
+    ds: std::sync::Arc<Dataset>,
+    sub_brick: usize,
+    generation: u64,
+    layers: Vec<(crate::session::OverlayLayer, std::sync::Arc<Dataset>)>,
+    keeps: Vec<Option<std::sync::Arc<Vec<bool>>>>,
+    series: crate::session::SeriesSettings,
+}
+
+impl TargetData {
+    fn target<'a>(&'a self, store: &'a crate::session::DatasetStore) -> Target<'a> {
+        Target {
+            ds: &self.ds,
+            sub_brick: self.sub_brick,
+            generation: self.generation,
+            overlays: self
+                .layers
+                .iter()
+                .zip(&self.keeps)
+                .map(|((layer, ds), keep)| OverlayTarget {
+                    layer,
+                    ds: ds.as_ref(),
+                    keep: keep.clone(),
+                })
+                .collect(),
+            store,
+            series: &self.series,
+        }
+    }
+}
+
+/// Half `n` of `count` side-by-side halves of `area` (the whole area for one).
+fn half(area: egui::Rect, n: usize, count: usize) -> egui::Rect {
+    if count < 2 {
+        return area;
+    }
+    let gap = 8.0;
+    let w = (area.width() - gap) / 2.0;
+    egui::Rect::from_min_size(
+        egui::pos2(area.left() + n as f32 * (w + gap), area.top()),
+        egui::vec2(w, area.height()),
+    )
+}
+
+/// The label strip above a controller's half in compare mode: its letter,
+/// the underlay's name, and a mark for the active controller. Returns the
+/// strip and the rest of the half.
+fn controller_strip(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    rect: egui::Rect,
+    k: usize,
+    active: usize,
+    session: &Session,
+) -> (Option<egui::Rect>, egui::Rect) {
+    let strip = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 22.0));
+    let body = egui::Rect::from_min_max(egui::pos2(rect.left(), strip.bottom() + 4.0), rect.max);
+    let name = session
+        .controllers
+        .get(k)
+        .and_then(|c| c.underlay)
+        .and_then(|id| session.store.get(id))
+        .map_or("no dataset".to_string(), |d| d.name.clone());
+    let is_active = k == active;
+    ui.scope_builder(egui::UiBuilder::new().max_rect(strip), |ui| {
+        ui.horizontal(|ui| {
+            let (chip, _) = ui.allocate_exact_size(egui::vec2(22.0, 18.0), egui::Sense::hover());
+            ui.painter().rect_filled(
+                chip,
+                4.0,
+                if is_active {
+                    theme.accent
+                } else {
+                    theme.card_hi
+                },
+            );
+            ui.painter().text(
+                chip.center(),
+                egui::Align2::CENTER_CENTER,
+                Session::controller_name(k),
+                egui::FontId::proportional(13.0),
+                if is_active {
+                    egui::Color32::BLACK
+                } else {
+                    theme.text
+                },
+            );
+            ui.label(egui::RichText::new(name).color(if is_active {
+                theme.text
+            } else {
+                theme.text_dim
+            }));
+        });
+    });
+    (Some(strip), body)
 }
 
 /// Storage key for the recently chosen datasets.
@@ -1121,27 +1400,27 @@ mod tests {
         // `AFNI_LEFT_IS_LEFT = YES` in ~/.afniru, as parsed by the preferences.
         let p = Prefs::parse("***ENVIRONMENT\n AFNI_LEFT_IS_LEFT = YES\n");
         let app = App::new(p, &[], true);
-        assert!(app.view.options.left_is_left);
-        assert!(app.view.conventions(None).contains("neurological"));
+        assert!(app.options.left_is_left);
+        assert!(app.views[0].conventions(None).contains("neurological"));
         let harness = run_frames(app, vec2(1000.0, 700.0));
         assert!(harness.query_all_by_label("L↔R").next().is_some());
         // Without it, the default is radiological.
         let app = demo(ThemeChoice::Dark);
-        assert!(!app.view.options.left_is_left);
-        assert!(app.view.conventions(None).contains("radiological"));
+        assert!(!app.options.left_is_left);
+        assert!(app.views[0].conventions(None).contains("radiological"));
     }
 
     #[test]
     fn the_left_right_button_flips_its_label_and_the_status_bar_follows() {
         let app = demo(ThemeChoice::Dark);
         let mut harness = run_frames(app, vec2(1000.0, 700.0));
-        assert!(!harness.state().view.options.left_is_left);
+        assert!(!harness.state().options.left_is_left);
         harness.get_by_label("R↔L").click();
         harness.run();
-        assert!(harness.state().view.options.left_is_left);
+        assert!(harness.state().options.left_is_left);
         harness.get_by_label("L↔R").click(); // the button now reads L↔R
         harness.run();
-        assert!(!harness.state().view.options.left_is_left);
+        assert!(!harness.state().options.left_is_left);
         assert!(harness.query_all_by_label("R↔L").next().is_some());
         assert!(harness.query_all_by_label("L↔R").next().is_none());
     }
@@ -1607,7 +1886,7 @@ mod tests {
             .map(|(l, _)| l)
             .collect();
         let under = app.session.underlay().unwrap().clone();
-        app.view
+        app.views[0]
             .probe(&under, &layers, &app.session.controller().cursor)
             .into_iter()
             .map(|p| p.drawn)
@@ -1770,6 +2049,7 @@ mod tests {
             letters: false,
             crosshair: false,
             label: SliceLabel::default(),
+            graph: false,
         }
     }
 
@@ -1887,7 +2167,6 @@ mod tests {
     #[test]
     fn orientation_letters_the_slice_number_and_the_crosshair_are_drawn_when_asked() {
         let (mut app, dir) = export_app();
-        let count_white = |img: &image::RgbaImage| img.pixels().filter(|p| p.0[0] >= 200).count();
         let base_path = dir.path().join("base.png");
         app.export_to(ExportWhat::Slice(Plane::Axial), &plain(), &base_path);
         let base = png(&base_path);
@@ -1998,13 +2277,13 @@ mod tests {
     fn the_right_click_menu_turns_the_slice_number_on_for_every_view() {
         let (app, _) = clusterize_app();
         let mut harness = run_frames(app, vec2(1300.0, 900.0));
-        assert!(!harness.state().view.options.slice_label.show);
+        assert!(!harness.state().options.slice_label.show);
         // Right-click the sagittal image (any view will do).
         let header = harness.get_all_by_value("Sagittal").next().unwrap().rect();
         right_click(&mut harness, header.center() + vec2(0.0, 120.0));
         harness.get_by_label("Slice number").click();
         harness.run();
-        let label = harness.state().view.options.slice_label;
+        let label = harness.state().options.slice_label;
         assert!(label.show);
         // The setting is the views', not one card's: the axial card draws it too.
         harness.snapshot("slice_numbers_on_all_views");
@@ -2021,7 +2300,7 @@ mod tests {
         harness.run();
         harness.get_by_label("bottom right").click();
         harness.run();
-        let l = harness.state().view.options.slice_label;
+        let l = harness.state().options.slice_label;
         assert_eq!(l.corner, Corner::BottomRight);
         assert!(l.show, "choosing a position turns the number on");
         right_click(&mut harness, header.center() + vec2(0.0, 120.0));
@@ -2030,7 +2309,7 @@ mod tests {
         harness.get_by_label("extra large").click();
         harness.run();
         assert_eq!(
-            harness.state().view.options.slice_label.size,
+            harness.state().options.slice_label.size,
             LabelSize::ExtraLarge
         );
     }
@@ -2105,6 +2384,297 @@ mod tests {
         harness.get_by_label("zz_target.nii").click();
         harness.run();
         assert!(harness.query_all_by_label("zz_target.nii").next().is_none());
+    }
+
+    // ---- The Graph ----
+
+    /// The 40-point fixture as the underlay, the crosshair in the middle.
+    fn graph_app() -> App {
+        let mut app = App::new(
+            prefs(ThemeChoice::Dark, CanvasBackground::Black),
+            &[],
+            false,
+        );
+        app.apply(vec![SessionAction::LoadDataset(
+            fixtures_dir().join("bold+orig"),
+            LoadRole::Underlay,
+        )]);
+        app.poll_loads();
+        app.apply(vec![SessionAction::MoveCrosshair([2, 2, 3])]);
+        app
+    }
+
+    fn graph_cell(harness: &egui_kittest::Harness<'_, App>) -> egui::Rect {
+        // The Graph's header is in the fourth cell: the plot is below it.
+        let header = harness.get_all_by_value("Graph").last().unwrap().rect();
+        egui::Rect::from_min_size(header.left_top() + vec2(0.0, 20.0), vec2(380.0, 230.0))
+    }
+
+    #[test]
+    fn clicking_in_the_graph_changes_the_time_point_of_the_underlay() {
+        let mut harness = run_frames(graph_app(), vec2(1400.0, 900.0));
+        assert_eq!(harness.state().session.controller().underlay_sub_brick, 0);
+        // Click a third of the way across the plot: about time point 13 of 40.
+        let cell = graph_cell(&harness);
+        let at = egui::pos2(cell.left() + cell.width() * 0.4, cell.center().y);
+        harness.hover_at(at);
+        harness.run();
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run();
+        }
+        harness.run();
+        let tr = harness.state().session.controller().underlay_sub_brick;
+        assert!((8..=24).contains(&tr) && tr != 0, "time point {tr}");
+    }
+
+    #[test]
+    fn the_graph_matrix_shows_the_neighbors_and_a_click_moves_the_crosshair() {
+        use crate::session::SeriesChange;
+        let mut app = graph_app();
+        app.apply(vec![SessionAction::Series(SeriesChange::Matrix(3))]);
+        let mut harness = run_frames(app, vec2(1400.0, 900.0));
+        harness.snapshot("graph_matrix_3x3");
+        let before = harness.state().session.controller().cursor.ijk;
+        // Click the top-left small graph of the 3x3.
+        let cell = graph_cell(&harness);
+        let at = egui::pos2(
+            cell.left() + cell.width() * 0.12,
+            cell.top() + cell.height() * 0.1,
+        );
+        harness.hover_at(at);
+        harness.run();
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run();
+        }
+        harness.run();
+        let after = harness.state().session.controller().cursor.ijk;
+        assert_ne!(before, after);
+        for a in 0..3 {
+            assert!(before[a].abs_diff(after[a]) <= 1, "{before:?} -> {after:?}");
+        }
+    }
+
+    #[test]
+    fn a_stimulus_is_shaded_and_a_fit_is_drawn_in_the_graph() {
+        use crate::session::SeriesChange;
+        use crate::session::series::Stim;
+        let mut app = graph_app();
+        let stim = Stim {
+            name: "blocks.1D".into(),
+            on: (0..40).map(|t| t % 10 >= 5).collect(),
+        };
+        app.apply(vec![SessionAction::Series(SeriesChange::Stim(Some(stim)))]);
+        app.apply(vec![SessionAction::LoadDataset(
+            fixtures_dir().join("bold+orig"),
+            LoadRole::GraphFit,
+        )]);
+        app.poll_loads();
+        assert!(app.session.controller().series.fit.is_some());
+        let mut harness = run_frames(app, vec2(1400.0, 900.0));
+        harness.snapshot("graph_stimulus_and_fit");
+    }
+
+    #[test]
+    fn the_graph_can_be_saved_alone_or_with_the_views() {
+        let mut app = graph_app();
+        let dir = crate::testutil::TempDir::new("graphsave");
+        let opts = ExportOptions {
+            letters: false,
+            ..plain()
+        };
+        // On its own: 200 x 100 pixels per zoom step.
+        let path = dir.path().join("g.png");
+        app.export_to(ExportWhat::Graph, &opts, &path);
+        assert!(app.error.is_none(), "{:?}", app.error);
+        let g = png(&path);
+        assert_eq!((g.width(), g.height()), (800, 400));
+        // The picture has the trace on the black canvas.
+        assert!(g.pixels().filter(|p| p.0[0] > 200).count() > 200);
+        // With the three views: a fourth picture in a row, a column, or the grid's cell.
+        let size = |app: &mut App, layout, graph, name: &str| {
+            let path = dir.path().join(name);
+            app.export_to(
+                ExportWhat::Views(layout),
+                &ExportOptions { graph, ..opts },
+                &path,
+            );
+            png(&path)
+        };
+        // The Graph is given at least 240 x 150 pixels, more than these tiny views.
+        let (w, h, gap) = (240, 150, 8);
+        let row = size(&mut app, ViewsLayout::Row, true, "row.png");
+        assert_eq!((row.width(), row.height()), (4 * w + 3 * gap, h));
+        let row3 = size(&mut app, ViewsLayout::Row, false, "row3.png");
+        assert_eq!(row3.width(), 3 * 20 + 2 * gap); // the views' own size, no Graph
+        let column = size(&mut app, ViewsLayout::Column, true, "col.png");
+        assert_eq!((column.width(), column.height()), (w, 4 * h + 3 * gap));
+        let grid = size(&mut app, ViewsLayout::Grid, true, "grid.png");
+        assert_eq!((grid.width(), grid.height()), (2 * w + gap, 2 * h + gap));
+        // In the 2x2 grid the Graph fills the fourth cell, which is empty without it.
+        let bright = |img: &image::RgbaImage, (w, h): (u32, u32)| {
+            (h + gap..2 * h + gap)
+                .flat_map(|y| (w + gap..2 * w + gap).map(move |x| (x, y)))
+                .filter(|&(x, y)| img.get_pixel(x, y).0[0] > 100)
+                .count()
+        };
+        assert!(bright(&grid, (w, h)) > 20);
+        let grid3 = size(&mut app, ViewsLayout::Grid, false, "grid3.png");
+        assert_eq!(bright(&grid3, (20, 36)), 0, "the fourth cell stays empty");
+        // Separate files: the Graph is the fourth.
+        app.export_to(
+            ExportWhat::Views(ViewsLayout::Individual),
+            &ExportOptions {
+                graph: true,
+                ..opts
+            },
+            &dir.path().join("fig.png"),
+        );
+        for view in ["axial", "sagittal", "coronal", "graph"] {
+            assert!(
+                dir.path().join(format!("fig_{view}.png")).is_file(),
+                "{view}"
+            );
+        }
+    }
+
+    #[test]
+    fn saving_the_graph_with_no_time_series_says_so() {
+        let (mut app, dir) = export_app(); // a single-volume underlay
+        app.export_to(ExportWhat::Graph, &plain(), &dir.path().join("g.png"));
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|e| e.contains("no time series"))
+        );
+        assert!(!dir.path().join("g.png").exists());
+    }
+
+    #[test]
+    fn dragging_a_box_in_the_graph_zooms_and_the_button_returns_to_the_full_course() {
+        let mut harness = run_frames(graph_app(), vec2(1400.0, 900.0));
+        let cell = graph_cell(&harness);
+        let full_course_enabled = |h: &egui_kittest::Harness<'_, App>| {
+            !egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Full course"))
+                .is_disabled()
+        };
+        assert!(!full_course_enabled(&harness), "nothing to undo at first");
+        // Drag a box across a quarter of the time course.
+        let from = egui::pos2(cell.left() + cell.width() * 0.3, cell.center().y - 30.0);
+        let to = egui::pos2(cell.left() + cell.width() * 0.5, cell.center().y + 30.0);
+        harness.hover_at(from);
+        harness.run();
+        harness.drag_at(from);
+        harness.run();
+        // The drag starts with the first small move (as with a real mouse).
+        harness.hover_at(from + vec2(3.0, 0.0));
+        harness.run();
+        harness.hover_at(to);
+        harness.run();
+        harness.drop_at(to);
+        harness.run();
+        harness.run();
+        assert!(full_course_enabled(&harness), "zoomed in");
+        // Zooming is not a click: the time point did not change.
+        assert_eq!(harness.state().session.controller().underlay_sub_brick, 0);
+        harness.get_by_label("Full course").click();
+        harness.run();
+        harness.run();
+        assert!(!full_course_enabled(&harness), "back to the whole course");
+    }
+
+    #[test]
+    fn hovering_the_graph_shows_the_time_point_and_value() {
+        let mut harness = run_frames(graph_app(), vec2(1400.0, 900.0));
+        let cell = graph_cell(&harness);
+        harness.hover_at(egui::pos2(
+            cell.left() + cell.width() * 0.5,
+            cell.center().y,
+        ));
+        harness.run();
+        harness.run();
+        assert!(
+            harness
+                .query_all_by_label_contains("time point")
+                .next()
+                .is_some()
+        );
+        assert!(
+            harness
+                .query_all_by_label_contains("value")
+                .next()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn the_graph_card_summary_and_settings_follow_the_session() {
+        use crate::session::SeriesChange;
+        let mut app = graph_app();
+        app.apply(vec![
+            SessionAction::Series(SeriesChange::Matrix(5)),
+            SessionAction::Series(SeriesChange::Ignore(3)),
+            SessionAction::Series(SeriesChange::Percent(true)),
+        ]);
+        let s = app.session.controller().series.clone();
+        assert_eq!((s.matrix, s.ignore, s.percent), (5, 3, true));
+        // Nonsense is refused.
+        app.apply(vec![
+            SessionAction::Series(SeriesChange::Matrix(4)),
+            SessionAction::Series(SeriesChange::Ignore(1_000_000)),
+        ]);
+        let s = app.session.controller().series.clone();
+        assert_eq!(s.matrix, 5);
+        assert!(s.ignore <= crate::session::series::MAX_IGNORE);
+    }
+
+    #[test]
+    fn a_long_sub_brick_list_can_be_filtered_by_number_and_picked() {
+        use egui::accesskit::Role;
+        let mut app = App::new(
+            prefs(ThemeChoice::Dark, CanvasBackground::Black),
+            &[],
+            false,
+        );
+        app.apply(vec![SessionAction::LoadDataset(
+            fixtures_dir().join("bold+orig"),
+            LoadRole::Underlay,
+        )]);
+        app.poll_loads();
+        let mut harness = run_frames(app, vec2(1000.0, 1000.0));
+        // Combos in order: the workspace menu, ULay, then the sub-brick chooser.
+        harness
+            .get_all_by_role(Role::ComboBox)
+            .nth(2)
+            .unwrap()
+            .click();
+        harness.run();
+        harness.get_by_role(Role::TextInput).click();
+        harness.run();
+        harness.get_by_role(Role::TextInput).type_text("#17");
+        harness.run();
+        harness.run();
+        assert!(harness.query_all_by_label_contains("#17").next().is_some());
+        assert!(harness.query_all_by_label_contains("#3 ").next().is_none());
+        harness
+            .get_all_by_label_contains("#17")
+            .next()
+            .unwrap()
+            .click();
+        harness.run();
+        harness.run();
+        assert_eq!(harness.state().session.controller().underlay_sub_brick, 17);
     }
 
     #[test]
@@ -2246,6 +2816,63 @@ mod tests {
         // Nothing is read into memory until one is picked.
         assert!(app.session.store.is_empty());
         assert!(app.session.underlay().is_none());
+    }
+
+    #[test]
+    fn a_recursive_listing_shows_each_subfolder_under_its_name() {
+        let dir = crate::testutil::TempDir::new("rtree");
+        for rel in [
+            "anat/T1.nii.gz",
+            "func/run1/bold+tlrc.HEAD",
+            "top+orig.HEAD",
+        ] {
+            let p = dir.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"x").unwrap();
+        }
+        let mut app = App::new(
+            prefs(ThemeChoice::Dark, CanvasBackground::Black),
+            &[],
+            false,
+        );
+        app.set_recursive_listing(true);
+        app.add_folder(dir.path());
+        let entries = app.folders[0].entries.clone().unwrap();
+        assert_eq!(entries.len(), 3);
+        assert!(app.folders[0].recursive);
+        let name = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let mut harness = run_frames(app, vec2(1000.0, 900.0));
+        // The header says how many folders there are.
+        assert!(
+            harness
+                .query_all_by_value("3 datasets in 3 folders")
+                .next()
+                .is_some()
+        );
+        harness.get_by_value("choose a dataset").click();
+        harness.run();
+        for heading in [format!("{name}/anat"), format!("{name}/func/run1")] {
+            assert!(
+                harness
+                    .query_all_by_label_contains(&heading)
+                    .next()
+                    .is_some(),
+                "{heading}"
+            );
+        }
+        // Without -R the same folder is one level.
+        let mut flat = App::new(
+            prefs(ThemeChoice::Dark, CanvasBackground::Black),
+            &[],
+            false,
+        );
+        flat.add_folder(dir.path());
+        assert_eq!(flat.folders[0].entries.as_ref().unwrap().len(), 1);
     }
 
     #[test]
@@ -2428,6 +3055,295 @@ mod tests {
         );
     }
 
+    // ---- Controllers A and B ----
+
+    /// The clustered-statistic dataset as controller A, cloned into B.
+    fn two_controllers() -> (App, crate::session::LayerId) {
+        let (mut app, id) = clusterize_app();
+        app.apply(vec![SessionAction::CloneController { from: 0, to: 1 }]);
+        (app, id)
+    }
+
+    #[test]
+    fn the_plus_clones_the_active_controller_into_b_and_switches_to_compare() {
+        let (app, _) = clusterize_app();
+        let mut harness = run_frames(app, vec2(1500.0, 900.0));
+        assert_eq!(harness.state().session.controllers.len(), 1);
+        assert!(!harness.state().compare);
+        // The first + is the controller tabs' (the overlay card has one too).
+        harness
+            .get_all_by_label(egui_phosphor::regular::PLUS)
+            .next()
+            .unwrap()
+            .click();
+        harness.run();
+        harness.run();
+        let s = &harness.state().session;
+        assert_eq!(s.controllers.len(), 2);
+        assert_eq!(s.active, 1, "the copy is active");
+        assert!(harness.state().compare, "the view area compares A and B");
+        assert_eq!(harness.state().views.len(), 2);
+        assert_eq!(harness.state().clusters.len(), 2);
+        // Both tabs exist.
+        assert!(harness.query_all_by_label("Controller A").next().is_some());
+        assert!(harness.query_all_by_label("Controller B").next().is_some());
+    }
+
+    #[test]
+    fn clicking_a_tab_or_a_half_makes_that_controller_the_active_one() {
+        let (app, _) = two_controllers();
+        let mut harness = run_frames(app, vec2(1500.0, 900.0));
+        assert_eq!(harness.state().session.active, 1);
+        harness.get_by_label("Controller A").click();
+        harness.run();
+        assert_eq!(harness.state().session.active, 0);
+        // Clicking in B's half (the right one) selects B.
+        let right = egui::pos2(1100.0, 400.0);
+        harness.hover_at(right);
+        harness.run();
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos: right,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run();
+        }
+        harness.run();
+        assert_eq!(harness.state().session.active, 1);
+    }
+
+    #[test]
+    fn moving_the_crosshair_in_one_controller_moves_it_in_the_other_when_linked() {
+        let (mut app, _) = two_controllers();
+        app.apply(vec![SessionAction::SelectController(0)]);
+        app.apply(vec![SessionAction::MoveCrosshair([3, 4, 5])]);
+        let mut harness = run_frames(app, vec2(1500.0, 900.0));
+        let s = &harness.state().session;
+        assert_eq!(s.controllers[0].cursor.ijk, [3, 4, 5]);
+        assert_eq!(s.controllers[1].cursor.ijk, [3, 4, 5], "B followed A");
+        // The other way round, too.
+        harness.state_mut().apply(vec![
+            SessionAction::SelectController(1),
+            SessionAction::MoveCrosshair([0, 1, 2]),
+        ]);
+        harness.run();
+        harness.run();
+        let s = &harness.state().session;
+        assert_eq!(s.controllers[0].cursor.ijk, [0, 1, 2], "A followed B");
+        // Unlinked, they go their own ways.
+        harness
+            .state_mut()
+            .apply(vec![SessionAction::SetLinks(crate::session::Links {
+                crosshair: false,
+                zoom: true,
+            })]);
+        harness
+            .state_mut()
+            .apply(vec![SessionAction::MoveCrosshair([1, 1, 1])]);
+        harness.run();
+        harness.run();
+        let s = &harness.state().session;
+        assert_eq!(s.controllers[1].cursor.ijk, [1, 1, 1]);
+        assert_eq!(s.controllers[0].cursor.ijk, [0, 1, 2]);
+    }
+
+    #[test]
+    fn each_controller_keeps_its_own_overlay_settings_and_clusters() {
+        let (mut app, id_a) = two_controllers();
+        let id_b = app.session.controllers[1].overlays[0].id;
+        assert_ne!(id_a, id_b);
+        app.apply(vec![SessionAction::Layer(
+            id_b,
+            OverlayChange::Threshold(2.5),
+        )]);
+        assert_eq!(app.session.controllers[0].overlays[0].threshold, 1.5);
+        assert_eq!(app.session.controllers[1].overlays[0].threshold, 2.5);
+        // Clusterize on B only.
+        app.apply(vec![SessionAction::Layer(
+            id_b,
+            OverlayChange::Cluster(Some(crate::session::ClusterSettings {
+                nn: 2,
+                min_size: 2.0,
+                ..Default::default()
+            })),
+        )]);
+        let harness = run_frames(app, vec2(1500.0, 900.0));
+        let app = harness.state();
+        assert!(app.clusters[1].get(id_b).is_some());
+        assert!(app.clusters[0].get(id_b).is_none());
+        assert!(app.clusters[0].get(id_a).is_none());
+        // B's table is B's: its threshold 2.5 gives fewer voxels than A's 1.5 would.
+        assert!(!cluster_rows_of(app, 1, id_b).is_empty());
+    }
+
+    fn cluster_rows_of(app: &App, ctl: usize, id: crate::session::LayerId) -> Vec<usize> {
+        app.clusters[ctl]
+            .get(id)
+            .and_then(|e| e.result.as_ref().ok())
+            .map(|o| o.rows.iter().map(|r| r.voxels).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn the_toolbar_lists_what_differs_and_can_make_one_like_the_other() {
+        let (mut app, _) = two_controllers();
+        let id_b = app.session.controllers[1].overlays[0].id;
+        app.apply(vec![SessionAction::Layer(
+            id_b,
+            OverlayChange::Threshold(4.0),
+        )]);
+        let mut harness = run_frames(app, vec2(1500.0, 900.0));
+        // The chip counts the differences.
+        harness.get_by_label_contains("A ≠ B").click();
+        harness.run();
+        assert!(
+            harness
+                .query_all_by_label_contains("threshold of overlay 1")
+                .next()
+                .is_some()
+        );
+        harness.get_by_label("Make B like A").click();
+        harness.run();
+        harness.run();
+        let s = &harness.state().session;
+        assert_eq!(s.controllers[1].overlays[0].threshold, 1.5);
+        assert!(s.differences(0, 1).is_empty());
+        assert!(
+            harness
+                .query_all_by_label_contains("A = B")
+                .next()
+                .is_some()
+        );
+    }
+
+    /// Zoom with a pinch over the first axial image, then let the frame settle.
+    fn pinch_over_axial(harness: &mut egui_kittest::Harness<'_, App>, factor: f32) {
+        let header = harness.get_all_by_value("Axial").next().unwrap().rect();
+        let at = header.center() + vec2(0.0, 130.0);
+        harness.hover_at(at);
+        harness.run();
+        harness.event(egui::Event::Zoom(factor));
+        harness.run();
+        harness.run();
+    }
+
+    #[test]
+    fn a_pinch_zooms_the_views_and_a_double_click_shows_the_whole_image_again() {
+        let (app, _) = clusterize_app();
+        // Short frames, so that two clicks a frame apart are a double-click.
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(vec2(1300.0, 900.0))
+            .with_step_dt(0.02)
+            .build_ui_state(
+                |ui, app: &mut App| {
+                    app.draw(ui);
+                },
+                app,
+            );
+        harness.run();
+        assert_eq!(harness.state().views[0].zoom_state().zoom, 1.0);
+        pinch_over_axial(&mut harness, 2.0);
+        let z = harness.state().views[0].zoom_state().zoom;
+        assert!((z - 2.0).abs() < 0.01, "{z}");
+        // The zoom is shared by the three views: the zoom % reads twice as much.
+        pinch_over_axial(&mut harness, 1.5);
+        assert!((harness.state().views[0].zoom_state().zoom - 3.0).abs() < 0.01);
+        // Never below the whole image or above 16x.
+        pinch_over_axial(&mut harness, 0.01);
+        assert_eq!(harness.state().views[0].zoom_state().zoom, 1.0);
+        pinch_over_axial(&mut harness, 100.0);
+        assert_eq!(harness.state().views[0].zoom_state().zoom, 16.0);
+        // A double-click resets.
+        let header = harness.get_all_by_value("Axial").next().unwrap().rect();
+        let at = header.center() + vec2(0.0, 130.0);
+        for _ in 0..2 {
+            for pressed in [true, false] {
+                harness.event(egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                harness.run_steps(1);
+            }
+        }
+        harness.run();
+        assert_eq!(harness.state().views[0].zoom_state().zoom, 1.0);
+        assert_eq!(
+            harness.state().views[0].zoom_state().pans,
+            [egui::Vec2::ZERO; 3]
+        );
+    }
+
+    #[test]
+    fn zoom_is_linked_between_controllers_unless_unlinked() {
+        let (mut app, _) = two_controllers();
+        app.apply(vec![SessionAction::SelectController(0)]);
+        let mut harness = run_frames(app, vec2(1500.0, 900.0));
+        pinch_over_axial(&mut harness, 2.0); // over A's axial image
+        let zooms = |h: &egui_kittest::Harness<'_, App>| {
+            (
+                h.state().views[0].zoom_state().zoom,
+                h.state().views[1].zoom_state().zoom,
+            )
+        };
+        let (a, b) = zooms(&harness);
+        assert!((a - 2.0).abs() < 0.01 && (b - 2.0).abs() < 0.01, "{a} {b}");
+        harness
+            .state_mut()
+            .apply(vec![SessionAction::SetLinks(crate::session::Links {
+                crosshair: true,
+                zoom: false,
+            })]);
+        pinch_over_axial(&mut harness, 2.0);
+        let (a, b) = zooms(&harness);
+        assert!((a - 4.0).abs() < 0.01, "{a}");
+        assert!((b - 2.0).abs() < 0.01, "B kept its own zoom: {b}");
+    }
+
+    #[test]
+    fn snapshot_a_zoomed_view_keeps_its_orientation_letters_in_the_card() {
+        let (app, _) = clusterize_app();
+        let mut harness = run_frames(app, vec2(1300.0, 900.0));
+        pinch_over_axial(&mut harness, 3.0);
+        harness.snapshot("zoomed_views");
+    }
+
+    #[test]
+    fn closing_a_controller_removes_its_view_and_leaves_compare() {
+        let (app, _) = two_controllers();
+        let mut harness = run_frames(app, vec2(1500.0, 900.0));
+        harness
+            .state_mut()
+            .apply(vec![SessionAction::RemoveController(1)]);
+        harness.run();
+        harness.run();
+        let a = harness.state();
+        assert_eq!(
+            (a.session.controllers.len(), a.views.len(), a.clusters.len()),
+            (1, 1, 1)
+        );
+        assert!(!a.compare);
+        assert_eq!(a.session.active, 0);
+    }
+
+    #[test]
+    fn snapshot_two_controllers_side_by_side() {
+        let (mut app, _) = two_controllers();
+        let id_b = app.session.controllers[1].overlays[0].id;
+        app.apply(vec![SessionAction::Layer(
+            id_b,
+            OverlayChange::Threshold(3.0),
+        )]);
+        app.controller
+            .workspaces
+            .current_mut()
+            .toggle_collapsed(ToolId::Datasets);
+        snapshot("compare_a_b", app, vec2(1500.0, 800.0), None);
+    }
+
     // ---- Clusterize ----
 
     /// The clustered-statistic fixture as underlay and overlay, thresholded at
@@ -2485,7 +3401,7 @@ mod tests {
     }
 
     fn cluster_rows(app: &App, id: crate::session::LayerId) -> Vec<usize> {
-        app.clusters
+        app.clusters[0]
             .get(id)
             .and_then(|e| e.result.as_ref().ok())
             .map(|o| o.rows.iter().map(|r| r.voxels).collect())
@@ -2520,11 +3436,11 @@ mod tests {
                 .unwrap()
                 .on
         );
-        assert!(state.clusters.get(id).is_some());
+        assert!(state.clusters[0].get(id).is_some());
         harness.get_by_label(&chip).click();
         harness.run();
         assert!(harness.state().session.layer(id).unwrap().cluster.is_none());
-        assert!(harness.state().clusters.get(id).is_none());
+        assert!(harness.state().clusters[0].get(id).is_none());
     }
 
     #[test]
@@ -2543,10 +3459,12 @@ mod tests {
         let harness = run_frames(app, vec2(1300.0, 1100.0));
         let state = harness.state();
         let layer = state.session.layer(id).unwrap();
-        let keep = state.clusters.keep(layer).expect("restricted to clusters");
+        let keep = state.clusters[0]
+            .keep(layer)
+            .expect("restricted to clusters");
         assert_eq!(keep.iter().filter(|k| **k).count(), 23 + 22 + 9 + 2);
         // The views were given the same voxels.
-        assert!(state.view.overlay_frames(id).unwrap().keep.is_some());
+        assert!(state.views[0].overlay_frames(id).unwrap().keep.is_some());
     }
 
     #[test]
@@ -2808,6 +3726,12 @@ mod tests {
                 .is_some()
         );
         let invite = harness.get_by_label_contains("Click for every check");
+        // It opens to the left of the rail, so it does not cover the steps.
+        assert!(
+            invite.rect().right() <= row.left() + 1.0,
+            "{:?} vs {row:?}",
+            invite.rect()
+        );
         assert!(!harness.state().rail.detail_open);
         // Moving onto the pop-up keeps it open; clicking it opens the details.
         harness.hover_at(invite.rect().center());

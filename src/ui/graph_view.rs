@@ -9,7 +9,7 @@
 //! the crosshair there. The arithmetic is `tools::graph::series`.
 
 use egui::{Color32, Rect, RichText, Stroke, Ui, UiBuilder, Vec2b, pos2, vec2};
-use egui_plot::{Line, Plot, PlotPoints, Polygon, VLine};
+use egui_plot::{HoverPosition, Line, Plot, PlotPoints, Polygon, VLine};
 
 use crate::data::Dataset;
 use crate::geom::Plane;
@@ -17,7 +17,6 @@ use crate::geom::coords::{ijk_to_ras, ras_to_ijk};
 use crate::session::SeriesSettings;
 use crate::tools::graph::series::{self, Stats};
 use crate::ui::theme::Theme;
-use crate::ui::widgets::readout::format_value;
 
 /// What the view needs to draw.
 pub struct GraphInput<'a> {
@@ -50,6 +49,8 @@ pub struct GraphEvents {
     pub set_tr: Option<usize>,
     /// Move the crosshair to this voxel of the underlay.
     pub move_to: Option<[usize; 3]>,
+    /// The user asked to save the Graph as an image.
+    pub export: bool,
 }
 
 /// The colors of the traces, chosen for the theme: the data in the text
@@ -121,6 +122,18 @@ fn points(first: usize, values: &[f64]) -> PlotPoints<'static> {
     )
 }
 
+/// The series the Graph shows for the crosshair voxel, as it is plotted: the
+/// index of the first point, the values, and the fit. `None` when there is
+/// nothing to plot (no time series, or the crosshair is outside the dataset).
+pub fn center_series(input: &GraphInput) -> Option<(usize, Vec<f64>, Option<Vec<f64>>)> {
+    let center = map_voxel(input.under, input.source, input.cursor)?;
+    if input.source.nvols < 2 {
+        return None;
+    }
+    let c = cell(input, center)?;
+    Some((c.first, c.values, c.fit))
+}
+
 /// Draw the Graph view into `ui` (the cell's contents).
 pub fn graph_view(ui: &mut Ui, input: &GraphInput) -> GraphEvents {
     let theme = input.theme;
@@ -129,6 +142,21 @@ pub fn graph_view(ui: &mut Ui, input: &GraphInput) -> GraphEvents {
         let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), egui::Sense::hover());
         ui.painter().circle_filled(dot.center(), 4.0, theme.accent);
         ui.label(RichText::new("Graph").color(theme.text).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let zoomed: bool = ui.data(|d| d.get_temp(zoomed_key())).unwrap_or(false);
+            if ui
+                .add_enabled(
+                    zoomed,
+                    egui::Button::new(RichText::new("Full course").small()).small(),
+                )
+                .on_hover_text(
+                    "Show the whole time course (or double-click the graph).\nDrag a box to zoom, scroll to pan, click to show a time point.",
+                )
+                .clicked()
+            {
+                ui.data_mut(|d| d.insert_temp(reset_key(), true));
+            }
+        });
     });
 
     // Where the crosshair is, in the plotted dataset's grid.
@@ -285,6 +313,19 @@ fn range(cell: &Cell) -> (f64, f64) {
     }
 }
 
+/// Memory keys of the big plot: a request to show the full time course, and
+/// whether it is zoomed in.
+fn reset_key() -> egui::Id {
+    egui::Id::new("graph_reset_zoom")
+}
+fn zoomed_key() -> egui::Id {
+    egui::Id::new("graph_is_zoomed")
+}
+
+/// The big plot. Click: show that time point. Drag a box: zoom into it.
+/// Scroll: pan; pinch or Ctrl+scroll: zoom. Double-click, or the "Full
+/// course" button or menu item: back to the whole time course. Hover: the
+/// time point and value nearest the pointer.
 fn big_plot(
     ui: &mut Ui,
     input: &GraphInput,
@@ -292,61 +333,95 @@ fn big_plot(
     marker: Option<f64>,
     events: &mut GraphEvents,
 ) {
-    let theme = input.theme;
     let (lo, hi) = range(cell);
+    let first = cell.first as f64;
     let last = (cell.first + cell.values.len()).saturating_sub(1) as f64;
-    let response = Plot::new("graph_main")
-        .allow_zoom(false)
+    let tr_seconds = input.source.tr;
+    let mut plot = Plot::new("graph_main")
+        .allow_zoom(true)
+        .allow_scroll(true)
         .allow_drag(false)
-        .allow_scroll(false)
-        .allow_boxed_zoom(false)
-        .allow_double_click_reset(false)
+        .allow_boxed_zoom(true)
+        .boxed_zoom_pointer_button(egui::PointerButton::Primary)
+        .allow_double_click_reset(true)
         .show_grid(Vec2b::new(false, true))
-        .show_x(false)
+        .show_x(true)
         .show_y(false)
+        .label_formatter(move |hover| {
+            let (name, p) = match hover {
+                HoverPosition::NearDataPoint {
+                    plot_name,
+                    position,
+                    ..
+                } => (*plot_name, position),
+                HoverPosition::Elsewhere { position } => ("", position),
+            };
+            let tr = p.x.round() as i64;
+            let time = tr_seconds.map_or(String::new(), |s| format!(" · {:.1} s", tr as f64 * s));
+            let what = if name.is_empty() { "" } else { name };
+            Some(format!("{what}\ntime point {tr}{time}\nvalue {:.4}", p.y))
+        })
         .include_y(lo)
         .include_y(hi)
-        .include_x(cell.first as f64 - 0.5)
+        .include_x(first - 0.5)
         .include_x(last + 0.5)
         .set_margin_fraction(egui::vec2(0.0, 0.0))
-        .height(ui.available_height())
-        .show(ui, |plot_ui| {
-            stimulus(plot_ui, input, lo, hi);
+        .height(ui.available_height());
+    if ui
+        .data_mut(|d| d.remove_temp::<bool>(reset_key()))
+        .unwrap_or(false)
+    {
+        plot = plot.reset();
+    }
+    let colors = ink(input.theme);
+    let response = plot.show(ui, |plot_ui| {
+        stimulus(plot_ui, input, lo, hi);
+        plot_ui.line(
+            Line::new("series", points(cell.first, &cell.values))
+                .color(colors.data)
+                .width(1.6),
+        );
+        if let Some(fit) = &cell.fit {
             plot_ui.line(
-                Line::new("series", points(cell.first, &cell.values))
-                    .color(ink(input.theme).data)
-                    .width(1.6),
+                Line::new("fit", points(cell.first, fit))
+                    .color(colors.fit)
+                    .width(1.8),
             );
-            if let Some(fit) = &cell.fit {
-                plot_ui.line(
-                    Line::new("fit", points(cell.first, fit))
-                        .color(ink(input.theme).fit)
-                        .width(1.8),
-                );
-            }
-            if let Some(tr) = marker {
-                plot_ui.vline(
-                    VLine::new("TR", tr)
-                        .color(ink(input.theme).marker)
-                        .width(1.2),
-                );
-            }
-            let r = plot_ui.response();
-            if (r.clicked() || r.dragged())
-                && let Some(p) = plot_ui.pointer_coordinate()
-            {
-                Some(p.x)
-            } else {
-                None
-            }
-        });
+        }
+        if let Some(tr) = marker {
+            plot_ui.vline(VLine::new("TR", tr).color(colors.marker).width(1.2));
+        }
+        // A plain click (not the end of a box) shows that time point.
+        let r = plot_ui.response();
+        if r.clicked() {
+            plot_ui.pointer_coordinate().map(|p| p.x)
+        } else {
+            None
+        }
+    });
+    // Is the view narrower than the whole course?
+    let shown = response.transform.bounds().range_x();
+    let zoomed = (shown.end() - shown.start()) < (last - first + 1.0) - 0.5;
+    ui.data_mut(|d| d.insert_temp(zoomed_key(), zoomed));
     if input.source_is_under
         && let Some(x) = response.inner
     {
         let last_tr = input.source.nvols - 1;
         events.set_tr = Some((x.round().max(0.0) as usize).min(last_tr));
     }
-    let _ = theme;
+    response.response.context_menu(|ui| {
+        if ui
+            .add_enabled(zoomed, egui::Button::new("Full time course"))
+            .clicked()
+        {
+            ui.data_mut(|d| d.insert_temp(reset_key(), true));
+            ui.close();
+        }
+        if ui.button("Save the Graph…").clicked() {
+            events.export = true;
+            ui.close();
+        }
+    });
 }
 
 /// A graph of the matrix. Returns whether it was clicked.
@@ -405,6 +480,17 @@ fn small_plot(
     response.response.clicked()
 }
 
+/// A number for the footer: 3 significant digits, no more than 2 decimals.
+fn short(v: f64) -> String {
+    if v.abs() >= 100.0 {
+        format!("{v:.0}")
+    } else if v.abs() >= 10.0 {
+        format!("{v:.1}")
+    } else {
+        format!("{v:.2}")
+    }
+}
+
 fn footer_text(ui: &mut Ui, input: &GraphInput, cell: &Cell, center: [usize; 3]) {
     let theme = input.theme;
     let [i, j, k] = center;
@@ -414,13 +500,9 @@ fn footer_text(ui: &mut Ui, input: &GraphInput, cell: &Cell, center: [usize; 3])
     }
     let mut parts = Vec::new();
     if let Some(Stats { mean, sd, min, max }) = series::stats(&cell.values) {
-        parts.push(format!("mean {}", format_value(mean as f32)));
-        parts.push(format!("sd {}", format_value(sd as f32)));
-        parts.push(format!(
-            "range {} … {}",
-            format_value(min as f32),
-            format_value(max as f32)
-        ));
+        parts.push(format!("mean {}", short(mean)));
+        parts.push(format!("sd {}", short(sd)));
+        parts.push(format!("{} … {}", short(min), short(max)));
     }
     if input.source_is_under
         && let Some(v) = cell
@@ -428,11 +510,7 @@ fn footer_text(ui: &mut Ui, input: &GraphInput, cell: &Cell, center: [usize; 3])
             .get(input.current_tr.saturating_sub(cell.first))
             .filter(|_| input.current_tr >= cell.first)
     {
-        parts.push(format!(
-            "TR {} = {}",
-            input.current_tr,
-            format_value(*v as f32)
-        ));
+        parts.push(format!("TR {} = {}", input.current_tr, short(*v)));
     }
     if let Some(r2) = cell
         .fit
@@ -442,7 +520,7 @@ fn footer_text(ui: &mut Ui, input: &GraphInput, cell: &Cell, center: [usize; 3])
         parts.push(format!("R² {r2:.2}"));
     }
     if let Some(tr) = input.source.tr {
-        parts.push(format!("TR {tr} s"));
+        parts.push(format!("{tr} s/TR"));
     }
     ui.label(RichText::new(head).small().color(theme.text_dim));
     ui.label(

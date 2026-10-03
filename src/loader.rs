@@ -21,6 +21,8 @@ use crate::session::action::LoadRole;
 pub struct FolderListing {
     /// The folder.
     pub dir: PathBuf,
+    /// Does the listing include subfolders?
+    pub recursive: bool,
     /// Its datasets, sorted by name; `None` while it is being read.
     pub entries: Option<Vec<FolderEntry>>,
     /// Why it could not be read.
@@ -30,6 +32,9 @@ pub struct FolderListing {
 /// One dataset in a folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderEntry {
+    /// The subfolder it is in, relative to the listed folder (`""` for the
+    /// folder itself); only a recursive listing has any.
+    pub group: String,
     /// The name shown (`anat+tlrc`, `func.nii.gz`).
     pub label: String,
     /// What to open: for an AFNI dataset the `prefix+view` path, which `afni-io`
@@ -140,15 +145,15 @@ impl Loader {
     }
 
     /// Start listing the datasets in `dir`.
-    pub fn scan(&mut self, dir: &Path) {
+    pub fn scan(&mut self, dir: &Path, recursive: bool) {
         let owned = dir.to_path_buf();
         let (tx, rx) = mpsc::channel();
         if self.background {
             std::thread::spawn(move || {
-                let _ = tx.send(list_datasets(&owned));
+                let _ = tx.send(list_datasets(&owned, recursive));
             });
         } else {
-            let _ = tx.send(list_datasets(&owned));
+            let _ = tx.send(list_datasets(&owned, recursive));
         }
         self.scans.push(Scan {
             dir: dir.to_path_buf(),
@@ -266,34 +271,71 @@ fn size_on_disk(path: &Path) -> Option<u64> {
     None
 }
 
-/// The datasets directly inside `dir`: AFNI (`.HEAD`, listed as `prefix+view`)
-/// and NIfTI (`.nii`, `.nii.gz`), sorted by name, ignoring hidden files.
-pub fn list_datasets(dir: &Path) -> Result<Vec<FolderEntry>, String> {
-    let read = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let mut entries: Vec<FolderEntry> = read
-        .filter_map(Result::ok)
-        .filter(|e| e.path().is_file())
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') {
-                return None;
-            }
-            let label = if let Some(prefix) = name.strip_suffix(".HEAD") {
-                prefix.to_string()
-            } else if name.ends_with(".nii") || name.ends_with(".nii.gz") {
-                name
-            } else {
-                return None;
-            };
-            Some(FolderEntry {
-                path: dir.join(&label),
-                label,
-            })
-        })
-        .collect();
-    entries.sort_by_key(|e| e.label.to_lowercase());
+/// How deep a recursive listing goes, and the most datasets it lists (a safety
+/// net against listing a whole disk).
+const MAX_DEPTH: usize = 6;
+const MAX_ENTRIES: usize = 5000;
+
+/// The datasets in `dir`: AFNI (`.HEAD`, listed as `prefix+view`) and NIfTI
+/// (`.nii`, `.nii.gz`), sorted by name, ignoring hidden files. With
+/// `recursive` the subfolders are listed too (not following links; hidden
+/// folders skipped), each dataset carrying the subfolder it is in.
+pub fn list_datasets(dir: &Path, recursive: bool) -> Result<Vec<FolderEntry>, String> {
+    let mut entries = Vec::new();
+    read_folder(dir, "", recursive, 0, &mut entries)?;
+    entries.sort_by_key(|e| (e.group.to_lowercase(), e.label.to_lowercase()));
     entries.dedup();
     Ok(entries)
+}
+
+fn read_folder(
+    dir: &Path,
+    group: &str,
+    recursive: bool,
+    depth: usize,
+    out: &mut Vec<FolderEntry>,
+) -> Result<(), String> {
+    let read = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for e in read.filter_map(Result::ok) {
+        if out.len() >= MAX_ENTRIES {
+            break;
+        }
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        let Ok(kind) = e.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            if recursive && depth < MAX_DEPTH {
+                let sub = if group.is_empty() {
+                    name
+                } else {
+                    format!("{group}/{name}")
+                };
+                // An unreadable subfolder is skipped, not an error.
+                let _ = read_folder(&e.path(), &sub, recursive, depth + 1, out);
+            }
+            continue;
+        }
+        if !e.path().is_file() {
+            continue;
+        }
+        let label = if let Some(prefix) = name.strip_suffix(".HEAD") {
+            prefix.to_string()
+        } else if name.ends_with(".nii") || name.ends_with(".nii.gz") {
+            name
+        } else {
+            continue;
+        };
+        out.push(FolderEntry {
+            group: group.to_string(),
+            path: dir.join(&label),
+            label,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -321,17 +363,17 @@ mod tests {
             std::fs::write(dir.path().join(name), b"x").unwrap();
         }
         std::fs::create_dir(dir.path().join("sub+orig.HEAD")).unwrap(); // not a file
-        let found = list_datasets(dir.path()).unwrap();
+        let found = list_datasets(dir.path(), false).unwrap();
         let labels: Vec<&str> = found.iter().map(|e| e.label.as_str()).collect();
         assert_eq!(labels, ["anat+tlrc", "func+orig", "mask.nii", "t1.nii.gz"]);
         // The path to open for an AFNI dataset is prefix+view.
         assert_eq!(found[0].path, dir.path().join("anat+tlrc"));
-        assert!(list_datasets(&dir.path().join("missing")).is_err());
+        assert!(list_datasets(&dir.path().join("missing"), false).is_err());
     }
 
     #[test]
     fn the_fixtures_folder_lists_its_afni_datasets() {
-        let labels: Vec<String> = list_datasets(&fixtures())
+        let labels: Vec<String> = list_datasets(&fixtures(), false)
             .unwrap()
             .into_iter()
             .map(|e| e.label)
@@ -387,7 +429,7 @@ mod tests {
     fn a_threaded_load_arrives_later_without_blocking() {
         let mut l = Loader::new(true);
         l.load(&fixtures().join("bold+orig"), LoadRole::Underlay, 0);
-        l.scan(&fixtures());
+        l.scan(&fixtures(), false);
         let start = Instant::now();
         let (mut loaded, mut listed) = (Vec::new(), Vec::new());
         while loaded.is_empty() || listed.is_empty() {
@@ -410,5 +452,56 @@ mod tests {
         let info = l.loading();
         assert_eq!(info[0].name, "stat+orig");
         assert!(info[0].bytes.is_some_and(|b| b > 0));
+    }
+
+    #[test]
+    fn a_recursive_listing_names_the_subfolder_of_each_dataset() {
+        let dir = crate::testutil::TempDir::new("recursive");
+        let make = |rel: &str| {
+            let p = dir.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"x").unwrap();
+        };
+        make("top+orig.HEAD");
+        make("anat/T1.nii.gz");
+        make("func/run1/bold+tlrc.HEAD");
+        make("func/run1/bold+tlrc.BRIK");
+        make(".hidden/secret.nii");
+        make("docs/readme.txt");
+        // Not recursive: only the top.
+        let flat = list_datasets(dir.path(), false).unwrap();
+        assert_eq!(flat.len(), 1);
+        assert_eq!(flat[0].group, "");
+        // Recursive: everything, each with its subfolder, top first.
+        let deep = list_datasets(dir.path(), true).unwrap();
+        let rows: Vec<(&str, &str)> = deep
+            .iter()
+            .map(|e| (e.group.as_str(), e.label.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("", "top+orig"),
+                ("anat", "T1.nii.gz"),
+                ("func/run1", "bold+tlrc")
+            ]
+        );
+        assert_eq!(deep[2].path, dir.path().join("func/run1/bold+tlrc"));
+    }
+
+    #[test]
+    fn a_recursive_listing_stops_at_a_depth_limit() {
+        let dir = crate::testutil::TempDir::new("deep");
+        let mut rel = String::new();
+        for n in 0..9 {
+            rel.push_str(&format!("d{n}/"));
+        }
+        let p = dir.path().join(&rel);
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("too_deep.nii"), b"x").unwrap();
+        std::fs::write(dir.path().join("d0/near.nii"), b"x").unwrap();
+        let found = list_datasets(dir.path(), true).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].label, "near.nii");
     }
 }

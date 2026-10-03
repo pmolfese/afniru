@@ -349,10 +349,12 @@ fn expand(name: &str, subject: Option<&str>, runs: &[String]) -> Vec<String> {
     vec![n]
 }
 
-/// Drop names that are not stable outputs: temporaries (`rm.*`), `-`, globs,
+/// Drop names that are not stable outputs: temporaries (`rm.*`), `-`, `.` and
+/// other names with no letter or digit, globs,
 /// unexpanded variables, absolute or parent-relative paths.
 fn keep(name: &str) -> bool {
     !(name.is_empty()
+        || !name.chars().any(char::is_alphanumeric)
         || name == "-"
         || name.starts_with("rm.")
         || name.starts_with("./rm.")
@@ -558,5 +560,15 @@ mod tests {
             tokens("3dTcat -prefix a 'epi+orig[0..$]'"),
             ["3dTcat", "-prefix", "a", "epi+orig[0..$]"]
         );
+    }
+
+    #[test]
+    fn names_with_no_letter_or_digit_are_not_outputs() {
+        for odd in [".", "./", "..", "-", ";", ",", "", "()", "_"] {
+            assert!(!keep(odd), "{odd:?}");
+        }
+        for fine in ["mask_group", "full_mask.sub-01", "x", "a.b"] {
+            assert!(keep(fine), "{fine}");
+        }
     }
 }

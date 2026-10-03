@@ -16,6 +16,8 @@ pub enum Kind {
     Views,
     /// Many slices of one plane.
     Montage,
+    /// The Graph on its own.
+    Graph,
 }
 
 /// The dialog's state.
@@ -79,6 +81,7 @@ impl ExportDialog {
         match self.kind {
             Kind::Slice => ExportWhat::Slice(self.plane),
             Kind::Views => ExportWhat::Views(self.layout),
+            Kind::Graph => ExportWhat::Graph,
             Kind::Montage => ExportWhat::Montage(MontageSpec {
                 plane: self.plane,
                 rows: self.rows,
@@ -114,14 +117,26 @@ impl ExportDialog {
                     ui.selectable_value(&mut self.layout, layout, layout.label());
                 }
             });
-            if self.layout == ViewsLayout::Grid {
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                ui.checkbox(&mut self.options.graph, "include the Graph")
+                    .on_hover_text(
+                        "As a fourth picture in a row or column, in its cell of the 2×2 grid, or as its own file",
+                    );
+            });
+            if self.layout == ViewsLayout::Grid && !self.options.graph {
                 ui.label(
-                    RichText::new("The 2×2 grid leaves the Graph's cell empty.")
+                    RichText::new("Without the Graph its cell of the 2×2 grid stays empty.")
                         .small()
                         .color(theme.text_dim),
                 );
             }
         }
+        ui.radio_value(
+            &mut self.kind,
+            Kind::Graph,
+            "The Graph (time series at the crosshair)",
+        );
         ui.radio_value(
             &mut self.kind,
             Kind::Montage,
@@ -183,7 +198,7 @@ impl ExportDialog {
             ui.checkbox(&mut self.options.label.show, "slice number")
                 .on_hover_text("Where and how big: right-click an image");
             ui.add_enabled(
-                self.kind != Kind::Montage,
+                matches!(self.kind, Kind::Slice | Kind::Views),
                 egui::Checkbox::new(&mut self.options.crosshair, "crosshair"),
             );
         });

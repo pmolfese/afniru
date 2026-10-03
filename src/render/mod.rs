@@ -4,6 +4,7 @@
 
 pub mod compose;
 pub mod export;
+pub mod graph_image;
 pub mod label;
 pub mod layers;
 pub mod mask;

@@ -3,6 +3,7 @@
 //! Plain data, so it can later be parsed from text (AFNI `-com`-style
 //! scripting). [`Session::apply`](super::Session::apply) carries them out.
 
+use super::Links;
 use super::overlay::{LayerId, OverlayChange};
 use super::series::SeriesChange;
 use super::store::DatasetId;
@@ -27,6 +28,22 @@ pub enum LoadRole {
 /// A request to change the session.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    /// Show controller `index` (A is 0, B is 1, ...) in the controller panel.
+    SelectController(usize),
+    /// Copy controller `from` (its underlay, every overlay layer and all its
+    /// settings) into controller `to`; `to` is the next new controller to add
+    /// one. The copy becomes the active controller. The datasets are shared,
+    /// not copied.
+    CloneController {
+        /// The controller to copy.
+        from: usize,
+        /// The controller to write (an existing one, or the next new one).
+        to: usize,
+    },
+    /// Remove controller `index` (the last one cannot be removed).
+    RemoveController(usize),
+    /// Choose what is linked between controllers.
+    SetLinks(Links),
     /// Use this dataset as the underlay.
     SetUnderlay(DatasetId),
     /// Show this sub-brick of the underlay.

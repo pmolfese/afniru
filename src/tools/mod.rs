@@ -121,7 +121,6 @@ impl ToolId {
         match self {
             ToolId::Overlay => "Milestone 4",
             ToolId::Clusterize => "Milestone 6",
-            ToolId::Graph => "Milestone 7",
             ToolId::InstaCorr => "Milestone 9",
             _ => "a later milestone",
         }

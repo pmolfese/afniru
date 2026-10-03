@@ -7,7 +7,7 @@ use std::sync::Arc;
 use egui::{Context, Frame, Key, Margin, Rect, RichText, Stroke, Ui, UiBuilder, pos2, vec2};
 
 use super::theme::Theme;
-use super::view_card::{CardContext, OverlayView, PlaneCard, export_tile};
+use super::view_card::{CardContext, OverlayView, PlaneCard, export_tile, tile_size};
 use super::view_state::{Layout, ViewOptions};
 use super::widgets::readout::format_value;
 use crate::data::Dataset;
@@ -16,13 +16,14 @@ use crate::geom::{CoordOrient, Plane};
 use crate::prefs::Prefs;
 use crate::render::compose::Window;
 use crate::render::export::{self, ExportOptions, ExportWhat, Rgba8Image, ViewsLayout};
+use crate::render::graph_image;
 use crate::render::layers::{self, LayerInput};
 use crate::render::overlay::{OverlayFrames, max_abs};
 use crate::render::resample::{self, Grid};
 use crate::render::slice::{self, PlaneMap};
 use afni_core::color::Rgba;
 
-use super::graph_view::{GraphEvents, GraphInput, graph_view};
+use super::graph_view::{GraphEvents, GraphInput, center_series, graph_view};
 use crate::session::overlay::Binding;
 use crate::session::store::{DatasetId, DatasetStore};
 use crate::session::{Action as SessionAction, Cursor, LayerId, OverlayLayer, SeriesSettings};
@@ -31,6 +32,24 @@ use crate::session::{Action as SessionAction, Cursor, LayerId, OverlayLayer, Ser
 const GAP: f32 = 8.0;
 /// Inner margin of a card.
 const PAD: f32 = 8.0;
+
+/// How the views of one controller are zoomed and panned.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ZoomState {
+    /// The zoom factor (1: the image fits its card).
+    pub zoom: f32,
+    /// Each plane's pan, as a fraction of the fitted image.
+    pub pans: [egui::Vec2; 3],
+}
+
+impl Default for ZoomState {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            pans: [egui::Vec2::ZERO; 3],
+        }
+    }
+}
 
 /// What the view area shows: the dataset, which of its sub-bricks, and a
 /// number that changes whenever either does (the cache key).
@@ -106,6 +125,8 @@ pub struct ViewArea {
     sub_cache: SubFrames,
     /// Axial, coronal, sagittal (the order of [`Plane::ALL`]).
     cards: [PlaneCard; 3],
+    /// Zoom factor of the three planes (1 fits the image in its card).
+    zoom: f32,
     /// Changes the Graph view asked for (a new time point), for the app to
     /// apply after the frame.
     actions: Vec<SessionAction>,
@@ -122,6 +143,7 @@ impl ViewArea {
             overlay_cache: HashMap::new(),
             sub_cache: HashMap::new(),
             cards: Plane::ALL.map(PlaneCard::new),
+            zoom: 1.0,
             actions: Vec::new(),
         }
     }
@@ -383,6 +405,7 @@ impl ViewArea {
             window,
             generation,
             options: self.options,
+            zoom: self.zoom,
             overlays,
             sub_frames: &sub_frames,
         };
@@ -392,6 +415,7 @@ impl ViewArea {
         // Axial, sagittal, coronal, then the Graph (AFNI's usual arrangement).
         let order = [Plane::Axial, Plane::Sagittal, Plane::Coronal];
         let mut label_change = None;
+        let mut zoom_change = None;
         for (cell, plane) in cells.iter().zip(order) {
             let card = &mut self.cards[Plane::ALL.iter().position(|p| *p == plane).unwrap_or(0)];
             let active = cur.active == plane;
@@ -399,7 +423,13 @@ impl ViewArea {
             if let Some(label) = events.label {
                 label_change = Some(label);
             }
+            if let Some(z) = events.zoom {
+                zoom_change = Some(z);
+            }
             self.actions.extend(events.actions);
+        }
+        if let Some(z) = zoom_change {
+            self.zoom = z;
         }
         // The slice number is one setting for all three views.
         if let Some(label) = label_change {
@@ -413,28 +443,82 @@ impl ViewArea {
             if let Some(ijk) = events.move_to {
                 cur.ijk = ijk;
             }
+            if events.export {
+                self.actions.push(SessionAction::Export(ExportWhat::Graph));
+            }
+        }
+    }
+
+    /// What the Graph view needs for the crosshair.
+    fn graph_input<'a>(&self, theme: &'a Theme, t: &'a Target<'a>, cur: &Cursor) -> GraphInput<'a> {
+        let source = t.series.source.and_then(|id| t.store.get(id));
+        let fit = t.series.fit.and_then(|id| t.store.get(id));
+        GraphInput {
+            theme,
+            under: t.ds,
+            source: source.map_or(t.ds, |d| d.as_ref()),
+            source_is_under: source.is_none(),
+            fit: fit.map(|d| d.as_ref()),
+            settings: t.series,
+            cursor: cur.ijk,
+            plane: cur.active,
+            left_is_left: self.options.left_is_left,
+            current_tr: t.sub_brick,
         }
     }
 
     /// The Graph view for the crosshair, or why there is none.
     fn graph(&self, ui: &mut Ui, theme: &Theme, t: &Target, cur: &Cursor) -> GraphEvents {
-        let source = t.series.source.and_then(|id| t.store.get(id));
-        let fit = t.series.fit.and_then(|id| t.store.get(id));
-        graph_view(
-            ui,
-            &GraphInput {
-                theme,
-                under: t.ds,
-                source: source.map_or(t.ds, |d| d.as_ref()),
-                source_is_under: source.is_none(),
-                fit: fit.map(|d| d.as_ref()),
-                settings: t.series,
-                cursor: cur.ijk,
-                plane: cur.active,
-                left_is_left: self.options.left_is_left,
-                current_tr: t.sub_brick,
+        graph_view(ui, &self.graph_input(theme, t, cur))
+    }
+
+    /// The Graph as a picture of `size`, text `text_px` high, for a saved image.
+    fn graph_picture(
+        &self,
+        theme: &Theme,
+        t: &Target,
+        cur: &Cursor,
+        size: (usize, usize),
+        text_px: f32,
+        background: [u8; 3],
+    ) -> Result<Rgba8Image, String> {
+        let input = self.graph_input(theme, t, cur);
+        let (first, values, fit) = center_series(&input)
+            .ok_or("the Graph has no time series to save: choose a 4D dataset in the Graph card")?;
+        let stim: Vec<(usize, usize)> = t
+            .series
+            .stim
+            .as_ref()
+            .map(|s| crate::tools::graph::series::stim_blocks(&s.on))
+            .unwrap_or_default();
+        Ok(graph_image::render(
+            size,
+            &graph_image::GraphPicture {
+                first,
+                values: &values,
+                fit: fit.as_deref(),
+                stim: &stim,
+                marker: input.source_is_under.then_some(input.current_tr),
             },
-        )
+            background,
+            text_px,
+        ))
+    }
+
+    /// How the views are zoomed and panned, to be copied to another view.
+    pub fn zoom_state(&self) -> ZoomState {
+        ZoomState {
+            zoom: self.zoom,
+            pans: [self.cards[0].pan, self.cards[1].pan, self.cards[2].pan],
+        }
+    }
+
+    /// Zoom and pan like `state`.
+    pub fn set_zoom_state(&mut self, state: ZoomState) {
+        self.zoom = state.zoom;
+        for (card, pan) in self.cards.iter_mut().zip(state.pans) {
+            card.pan = pan;
+        }
     }
 
     /// The changes the Graph view asked for since the last call.
@@ -479,12 +563,28 @@ impl ViewArea {
             window,
             generation: t.generation,
             options: self.options,
+            zoom: 1.0,
             overlays,
             sub_frames: &sub_frames,
         };
         // One scale for every picture: the smallest voxel edge is `zoom` pixels.
         let smallest = ds.voxel_mm.iter().copied().fold(f64::INFINITY, f64::min);
         let px_per_mm = f64::from(opts.zoom.clamp(1, 8)) / smallest.max(1e-6);
+        // Text is sized against the tallest picture of the figure, so every
+        // slice number and letter comes out the same size.
+        let index_of = |plane: Plane| {
+            let axis = ds.orient.slice_axis(plane);
+            cur.ijk[axis]
+        };
+        let views = [Plane::Axial, Plane::Sagittal, Plane::Coronal];
+        let reference = match what {
+            ExportWhat::Views(_) => views
+                .iter()
+                .filter_map(|&p| tile_size(&cx, p, index_of(p), px_per_mm))
+                .map(|(_, h)| h)
+                .max(),
+            _ => None,
+        };
         let tile = |plane: Plane, index: usize, with_cursor: bool, letters: bool| {
             export_tile(
                 &cx,
@@ -495,14 +595,10 @@ impl ViewArea {
                 px_per_mm,
                 letters,
                 background,
+                reference,
             )
             .ok_or_else(|| format!("the {} slice {index} cannot be drawn", plane.name()))
         };
-        let index_of = |plane: Plane| {
-            let axis = ds.orient.slice_axis(plane);
-            cur.ijk[axis]
-        };
-        let views = [Plane::Axial, Plane::Sagittal, Plane::Coronal];
         match what {
             ExportWhat::Slice(plane) => Ok(vec![(
                 String::new(),
@@ -514,31 +610,54 @@ impl ViewArea {
                     .map(|&p| tile(p, index_of(p), opts.crosshair, opts.letters))
                     .collect::<Result<Vec<_>, _>>()?;
                 let gap = 2 * opts.zoom as usize;
+                // The Graph, if asked for, as big as the biggest view.
+                let mut tiles = tiles;
+                if opts.graph {
+                    // As big as the biggest view, and big enough to read.
+                    let cell_w = tiles.iter().map(|t| t.width).max().unwrap_or(1).max(240);
+                    let cell_h = tiles.iter().map(|t| t.height).max().unwrap_or(1).max(150);
+                    let px = (cell_h as f32 * 0.045).max(10.0);
+                    tiles.push(self.graph_picture(
+                        theme,
+                        t,
+                        cur,
+                        (cell_w, cell_h),
+                        px,
+                        background,
+                    )?);
+                }
+                let n = tiles.len();
                 Ok(match layout {
-                    ViewsLayout::Individual => views
-                        .iter()
-                        .zip(tiles)
-                        .map(|(p, img)| (p.name().to_lowercase(), img))
-                        .collect(),
+                    ViewsLayout::Individual => {
+                        let mut names: Vec<String> =
+                            views.iter().map(|p| p.name().to_lowercase()).collect();
+                        names.push("graph".into());
+                        names.into_iter().zip(tiles).collect()
+                    }
                     ViewsLayout::Row => vec![(
                         String::new(),
-                        export::arrange(&tiles, 1, 3, gap, background),
+                        export::arrange(&tiles, 1, n, gap, background),
                     )],
-                    ViewsLayout::Column => {
-                        vec![(
-                            String::new(),
-                            export::arrange(&tiles, 3, 1, gap, background),
-                        )]
-                    }
-                    // The fourth cell is where the Graph is on screen; it is
-                    // left empty (the Graph is not saved).
-                    ViewsLayout::Grid => {
-                        vec![(
-                            String::new(),
-                            export::arrange(&tiles, 2, 2, gap, background),
-                        )]
-                    }
+                    ViewsLayout::Column => vec![(
+                        String::new(),
+                        export::arrange(&tiles, n, 1, gap, background),
+                    )],
+                    // The fourth cell is where the Graph is on screen: the
+                    // Graph if it was asked for, else empty.
+                    ViewsLayout::Grid => vec![(
+                        String::new(),
+                        export::arrange(&tiles, 2, 2, gap, background),
+                    )],
                 })
+            }
+            ExportWhat::Graph => {
+                let zoom = opts.zoom.clamp(1, 8) as usize;
+                let size = (200 * zoom, 100 * zoom);
+                let px = (size.1 as f32 * 0.045).max(10.0);
+                Ok(vec![(
+                    String::new(),
+                    self.graph_picture(theme, t, cur, size, px, background)?,
+                )])
             }
             ExportWhat::Montage(spec) => {
                 let count = ds.dims[ds.orient.slice_axis(spec.plane)];
@@ -571,6 +690,7 @@ impl ViewArea {
                             &img,
                             [s.left, s.right, s.top, s.bottom],
                             background,
+                            Some(tiles[0].height),
                         );
                     }
                 }
@@ -1005,7 +1125,7 @@ mod render_tests {
                     series: &series,
                 };
                 egui::Panel::top("toolbar").show(ui, |ui| {
-                    shell::toolbar(ui, &theme, Some(&ds), &mut view.options);
+                    shell::toolbar(ui, &theme, Some(&ds), &mut view.options, None);
                 });
                 egui::Panel::bottom("readout").show(ui, |ui| {
                     view.readout(ui, &theme, &t, &cur);

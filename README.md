@@ -40,6 +40,33 @@ each reads.
 
 Click or drag in a view to move the crosshair; arrow keys move it one voxel in the view under the mouse; Page Up/Down change that view's slice. The toolbar switches layouts (1×3, 3×1, 2×2), swaps radiological/neurological, and hides the crosshair lines.
 
+## Controllers, compare and link
+
+A controller is one AFNI controller: its own underlay, overlay layers, tools,
+crosshair and Graph. The tabs at the top of the controller panel are A, B, …;
+the **+** clones the active controller into a new one (same data, copied
+settings), and the view area switches to **compare**: A and B side by side.
+Change B's threshold, color scale or overlay and see both at once. Click a tab
+or click in a half to work on that controller; right-click a tab to copy it over
+another or close it. The **Link** button in the toolbar links the crosshair
+(and so the slices) and the zoom, so scrolling through A scrolls B to the same
+place in the world even if their grids differ. The **A ≠ B** chip lists what
+differs and can make one like the other.
+
+**Zoom:** Ctrl+scroll (or a pinch) zooms around the pointer; scroll pans;
+double-click shows the whole image.
+
+## The Graph
+
+The fourth cell of the 2×2 layout plots the time series at the crosshair
+(click or drag in it to change the time point shown). The Graph card chooses the
+dataset (any dataset with several time points, not only the underlay), a **Fit**
+drawn over it (any dataset with the same number of time points), a **matrix** of
+1×1, 3×3 or 5×5 neighboring voxels (click one to move the crosshair there), how
+many time points to **ignore**, a **detrend**, **% of mean**, and a **stimulus**
+(a `.1D` column, shaded where it is on). Drag a box in the graph to zoom, scroll to pan, double-click or **Full course** to see everything; hovering shows the time point and value. The footer gives the mean, standard
+deviation, range, the value at the current time point and, with a fit, R².
+
 ## Slice numbers and saving images
 
 Right-click an image for its menu. **Slice number** draws the slice number on
@@ -56,8 +83,8 @@ the size (pixels per voxel, ×1 to ×8; voxels are always square blocks, never
 smoothed), orientation letters, the slice number, and the crosshair. Pictures
 use the underlay window, every visible overlay layer, and the radiological or
 neurological display you are using; the background follows
-`AFNIRU_CANVAS_BACKGROUND` (white for publication figures). The Graph is not
-saved: the 2×2 grid leaves its cell empty.
+`AFNIRU_CANVAS_BACKGROUND` (white for publication figures). The Graph can be
+saved too, alone or with the three views (as a fourth picture in a row or column, or in its cell of the 2×2 grid).
 
 ## The overlay
 

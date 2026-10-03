@@ -32,6 +32,11 @@ struct Cli {
     /// it is one.
     datasets: Vec<PathBuf>,
 
+    /// List the datasets of the folders given, and of all their subfolders,
+    /// each shown under its subfolder's name (`-R` or `-r`).
+    #[arg(short = 'R', short_alias = 'r', long = "recursive")]
+    recursive: bool,
+
     /// Open the built-in demo phantom with a fake t-map overlay (no data needed).
     #[arg(long)]
     demo: bool,
@@ -59,6 +64,7 @@ fn main() -> eframe::Result {
             let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) =
                 cli.datasets.iter().cloned().partition(|p| p.is_dir());
             let mut app = app::App::new(prefs, &files, cli.demo);
+            app.set_recursive_listing(cli.recursive);
             for dir in &dirs {
                 app.add_folder(dir);
             }
@@ -84,4 +90,21 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn r_and_capital_r_both_ask_for_a_recursive_listing() {
+        for flag in ["-R", "-r", "--recursive"] {
+            let cli = Cli::try_parse_from(["afniru", flag, "results"]).unwrap();
+            assert!(cli.recursive, "{flag}");
+            assert_eq!(cli.datasets, [PathBuf::from("results")]);
+        }
+        let cli = Cli::try_parse_from(["afniru", "anat+tlrc", "stats+tlrc"]).unwrap();
+        assert!(!cli.recursive);
+        assert_eq!(cli.datasets.len(), 2);
+    }
 }

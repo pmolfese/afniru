@@ -19,8 +19,8 @@ Status: ✅ done · 🚧 in progress · ⬜ not started
 | 4 | Overlay and threshold (one layer) | ✅ |
 | 5 | Multiple overlay layers | ✅ |
 | 6 | Hooked cards + Clusterize | ✅ |
-| 7 | Graph view + sub-brick selection | ⬜ |
-| 8 | Controllers A/B, Lock, **Clone to compare** | ⬜ |
+| 7 | Graph view + sub-brick selection | ✅ |
+| 8 | Controllers A/B, Lock, **Clone to compare** | ✅ |
 | 9 | InstaCorr | ⬜ |
 | 10 | Pop-out windows (controller, cards) | ⬜ |
 | — | Later (unordered) | ⬜ |
@@ -303,22 +303,37 @@ Decisions and gaps:
 - The Overlay card's chips list only Clusterize today; "Histogram" and "Atlas labels" in the mockup come with their tools.
 - A hooked card cannot be dragged away from its parent; it follows it.
 
-## Milestone 7 — Graph view + sub-bricks ⬜
+## Milestone 7 — Graph view + sub-bricks ✅
 
-- [ ] Sub-brick selectors by index and label (ULay, and OLay/Thr per layer)
-- [ ] `ui/graph_view.rs` in the 2×2 4th cell: time series at the crosshair, optional fit, stimulus blocks, current-TR marker, stats footer
-- [ ] Graph card: matrix (1/3/5), ignore, detrend
-- [ ] Tests: time series extraction at a voxel matches `3dmaskdump`
+- [x] Sub-brick selectors by index and label (ULay, and OLay/Thr per layer): a combo with a filter box (index or label) for long lists, drawn row by row so 1000+ sub-bricks stay fast
+- [x] `ui/graph_view.rs` in the 2×2 4th cell (`egui_plot`): time series at the crosshair, optional fit, stimulus blocks shaded, current-TR marker (click or drag to change it), stats footer
+- [x] Graph card: matrix (1/3/5, laid out like the active plane, one y range; click a graph to move the crosshair), ignore, detrend (none/mean/linear/quadratic through afni-core), percent of the mean, stimulus from a `.1D` file
+- [x] The plotted dataset and the fit can be **any** dataset (loaded, recent, or in a listed folder), not only the underlay or an overlay
+- [x] Recently chosen datasets (separate lists for the underlay, overlays and the Graph, 10 each, kept between runs) at the top of the dataset dropdowns
+- [x] Tests: time series at a voxel matches `3dmaskdump` (`tests/fixtures/bold+orig`, `bold_series.txt`, `make_bold_fixture.sh`); ignore/percent/detrend/fit scaling/R²/stimulus blocks/matrix layout; session validation; app-level TR click, matrix click, stimulus and fit, snapshots
 
-## Milestone 8 — Controllers A/B, Lock, Clone to compare ⬜
+Decisions and gaps:
+- The fit is drawn on the data's scale (percent of the *data's* mean, minus the trend removed from the data), so it stays on top of the points it fits.
+- The plot cannot be zoomed or panned yet; it shows the whole series.
+- The Graph is not part of saved images (the 2×2 grid leaves its cell empty).
+- Colors follow the theme (the first version was invisible on the light theme).
 
-- [ ] Mockup first: compare layout (A above B, each 1×3) with difference markers
-- [ ] `session/store.rs`: `Arc<Volume>` dataset store so controllers share voxel data
-- [ ] Multiple controllers as tabs; each has its own state
-- [ ] Lock / Link menu: crosshair, slices, zoom/pan (toggle each)
-- [ ] **Clone A → B**: copies the full `ControllerState`; view area switches to the compare layout
-- [ ] Differences: "≠" markers on changed settings in B's cards (A's value on hover); toolbar chip listing differences; "Sync from A" / "Push to B"
-- [ ] Tests: clone gives identical state; diff lists exactly the changed fields; linked crosshair moves both
+## Milestone 8 — Controllers A/B, Lock, Clone to compare ✅
+
+- [x] Several controllers as tabs (A, B, ...; up to four): each has its own underlay, overlay layers, tool states, crosshair, view area and clusters. The controller panel shows the active one; right-click a tab to clone, copy over another, or close it
+- [x] **Clone**: the **+** next to the tabs copies the active controller into a new one (underlay, every layer with its settings, Clusterize, Graph settings). The datasets are shared, not copied; layers get new ids and rules that read a layer read its copy. The view area switches to the compare layout
+- [x] **Compare layout**: A and B side by side, each laid out as the toolbar says (2×2 with its Graph, a row, or a column), each under a strip naming it; clicking in a half (or its tab) makes that controller the active one
+- [x] **Link** (toolbar): crosshair and slices (moving the crosshair in one moves it in the others to the same place in the world, even on different grids) and zoom and pan; each can be turned off
+- [x] **Zoom and pan** (new, needed for the link): Ctrl+scroll or a pinch zooms around the pointer (up to 16×), scroll pans a zoomed image, a double-click shows the whole image again; one zoom for the three views of a controller
+- [x] **Differences**: the toolbar chip (`A ≠ B · 3`) lists what differs between the compared controllers, setting by setting (A's value and B's), with *Make B like A* and *Make A like B*
+- [x] Tests: clone (copy, new layer ids, rules remapped, datasets shared), replace and remove (what only a removed controller used is freed), per-controller generation, the linked crosshair across different grids, the differences list; app-level tab/+/half clicks, link on and off, per-controller layers and clusters, Make B like A, closing a controller, pinch/double-click zoom, zoom link, a compare snapshot
+
+Decisions and gaps:
+- "Crosshair" and "slices" are one link here: the crosshair is a point, and each view's slice is that point's coordinate along the view's axis, so linking one links the other.
+- The mockup's "≠" marks on the changed settings in B's cards (with A's value on hover) are not drawn; the toolbar chip lists the differences instead.
+- Layers are compared by position (the first overlay of A with the first of B).
+- With more than two controllers, compare shows A and the active one.
+- Pop-out windows are still Milestone 10.
 
 ## Milestone 9 — InstaCorr ⬜
 
@@ -377,3 +392,4 @@ Decisions and gaps:
 - 2026-10-03 — M6 done: Clusterize hooked under Define Overlay (per layer), with the spine/socket UI, attach chips and group fold. Clusters match `3dClusterize` (new fixture `clust+orig` and AFNI's reports). Operators `<`, `&&`, `?:` etc. were added to `afni-core::calc` for mask rules, and the default overlay scale is now AFNI's own `Reds_and_Blues_Inv`.
 - 2026-10-03 — Background loading (`loader.rs`): datasets read on worker threads, applied in the order asked for, with name/size/elapsed shown; folders list their datasets (`AFNIRU_FOLDER_BROWSER`), loading only what is picked; replaced or removed datasets are freed. B keeps the fill. The AFNI logo is the window/dock icon.
 - 2026-10-03 — Slice numbers (right-click: on/off, corner, size; one setting for all views; `AFNIRU_SLICE_NUMBER*` in `~/.afniru`) and saving images (`render/export.rs`: slice, three views as row/column/grid/files, montages; PNG; a built-in pixel font draws the numbers and letters). The Graph is not included in saved images yet.
+- 2026-10-03 — M8 done: controllers A/B/…, clone to compare, side-by-side compare layout, linked crosshair and zoom, differences chip. Also: the Graph can be zoomed (drag a box), shows time point and value on hover, and is saved in exported images; saved images use one text size across the views; the rail's traffic-light pop-up opens beside the rail; `-R` lists subfolders.

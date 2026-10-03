@@ -124,12 +124,13 @@ impl Engine {
     pub fn update(
         &mut self,
         session: &Session,
+        ctl: usize,
         under: &Dataset,
         settled: bool,
         passed: PassedFn,
         wake: &Wake,
     ) -> bool {
-        let layers = &session.controller().overlays;
+        let layers = &session.controllers[ctl].overlays;
         let hooked = |id: &LayerId| layers.iter().any(|l| l.id == *id && l.cluster.is_some());
         self.entries.retain(|id, _| hooked(id));
         self.pending.retain(|id, _| hooked(id));
@@ -140,7 +141,7 @@ impl Engine {
             let Some(settings) = layer.cluster else {
                 continue;
             };
-            let key = key(session, layer);
+            let key = key(session, ctl, layer);
             if let Some(e) = self.entries.get_mut(&layer.id)
                 && e.key == key
             {
@@ -252,10 +253,10 @@ fn selection(layer: &OverlayLayer) -> Selection {
 }
 
 /// Everything the clusters of `layer` depend on.
-fn key(session: &Session, layer: &OverlayLayer) -> u64 {
+fn key(session: &Session, ctl: usize, layer: &OverlayLayer) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    session.selection_key(layer.id).hash(&mut h);
-    session.generation.hash(&mut h);
+    session.selection_key_in(ctl, layer.id).hash(&mut h);
+    session.controllers[ctl].generation.hash(&mut h);
     if let Some(c) = layer.cluster {
         // Whether the layer is restricted to its clusters does not change them.
         (c.nn, c.min_size.to_bits(), c.unit, c.bisided).hash(&mut h);
@@ -343,12 +344,12 @@ mod tests {
         let (mut s, id) = session();
         let under = s.underlay().unwrap().clone();
         let mut e = Engine::default();
-        assert!(!e.update(&s, &under, true, &no_views, &wake()));
+        assert!(!e.update(&s, s.active, &under, true, &no_views, &wake()));
         let out = e.get(id).unwrap().result.as_ref().unwrap();
         assert!(!out.rows.is_empty(), "the t-map has clusters above 3.1");
         assert_eq!(out.survivors.len(), under.dims.iter().product::<usize>());
         s.apply(Action::Layer(id, OverlayChange::Cluster(None)));
-        e.update(&s, &under, true, &no_views, &wake());
+        e.update(&s, s.active, &under, true, &no_views, &wake());
         assert!(e.get(id).is_none());
     }
 
@@ -357,16 +358,16 @@ mod tests {
         let (mut s, id) = session();
         let under = s.underlay().unwrap().clone();
         let mut e = Engine::default();
-        e.update(&s, &under, true, &no_views, &wake());
+        e.update(&s, s.active, &under, true, &no_views, &wake());
         let first = e.get(id).unwrap().result.as_ref().unwrap().clone();
         s.apply(Action::Layer(id, OverlayChange::Opacity(0.4)));
-        e.update(&s, &under, true, &no_views, &wake());
+        e.update(&s, s.active, &under, true, &no_views, &wake());
         assert!(Arc::ptr_eq(
             &first,
             e.get(id).unwrap().result.as_ref().unwrap()
         ));
         s.apply(Action::Layer(id, OverlayChange::Threshold(4.5)));
-        e.update(&s, &under, true, &no_views, &wake());
+        e.update(&s, s.active, &under, true, &no_views, &wake());
         let again = e.get(id).unwrap().result.as_ref().unwrap();
         assert!(!Arc::ptr_eq(&first, again));
         assert!(again.total_voxels < first.total_voxels);
@@ -377,14 +378,14 @@ mod tests {
         let (mut s, id) = session();
         let under = s.underlay().unwrap().clone();
         let mut e = Engine::default();
-        e.update(&s, &under, true, &no_views, &wake());
+        e.update(&s, s.active, &under, true, &no_views, &wake());
         let first = e.get(id).unwrap().result.as_ref().unwrap().clone();
         s.apply(Action::Layer(id, OverlayChange::Threshold(4.5)));
-        e.update(&s, &under, false, &no_views, &wake());
+        e.update(&s, s.active, &under, false, &no_views, &wake());
         let held = e.get(id).unwrap();
         assert!(held.stale);
         assert!(Arc::ptr_eq(&first, held.result.as_ref().unwrap()));
-        e.update(&s, &under, true, &no_views, &wake()); // released
+        e.update(&s, s.active, &under, true, &no_views, &wake()); // released
         assert!(!e.get(id).unwrap().stale);
     }
 
@@ -393,7 +394,7 @@ mod tests {
         let (mut s, id) = session();
         let under = s.underlay().unwrap().clone();
         let mut e = Engine::default();
-        e.update(&s, &under, true, &no_views, &wake());
+        e.update(&s, s.active, &under, true, &no_views, &wake());
         assert!(e.keep(s.layer(id).unwrap()).is_none());
         let on = ClusterSettings {
             only_clusters: true,
@@ -401,7 +402,7 @@ mod tests {
             ..ClusterSettings::default()
         };
         s.apply(Action::Layer(id, OverlayChange::Cluster(Some(on))));
-        e.update(&s, &under, true, &no_views, &wake());
+        e.update(&s, s.active, &under, true, &no_views, &wake());
         let keep = e.keep(s.layer(id).unwrap()).unwrap();
         assert!(keep.iter().any(|k| *k));
     }
@@ -413,14 +414,14 @@ mod tests {
         let under = s.underlay().unwrap().clone();
         let mut e = Engine::default();
         assert!(
-            e.update(&s, &under, true, &no_views, &wake()),
+            e.update(&s, s.active, &under, true, &no_views, &wake()),
             "waiting for frames"
         );
         assert!(e.get(id).is_none());
         let n = under.dims.iter().product::<usize>();
         let on: Vec<bool> = (0..n).map(|v| v % 150 < 3 && v < 150 * 3).collect();
         let supply = |_: &[OverlayLayer], _: LayerId| Some(on.clone());
-        assert!(!e.update(&s, &under, true, &supply, &wake()));
+        assert!(!e.update(&s, s.active, &under, true, &supply, &wake()));
         let out = e.get(id).unwrap().result.as_ref().unwrap();
         assert!(!out.has_values);
         assert!(out.total_voxels > 0);
@@ -430,7 +431,7 @@ mod tests {
     fn settle(e: &mut Engine, s: &Session, under: &Dataset, wake: &Wake) {
         let start = std::time::Instant::now();
         loop {
-            e.update(s, under, true, &no_views, wake);
+            e.update(s, s.active, under, true, &no_views, wake);
             if !e.busy() {
                 return;
             }
@@ -452,7 +453,7 @@ mod tests {
             })
         };
         let mut e = Engine::new(true);
-        e.update(&s, &under, true, &no_views, &w);
+        e.update(&s, s.active, &under, true, &no_views, &w);
         // Nothing yet to show unless the worker was very quick.
         assert!(e.busy() || e.get(id).is_some());
         settle(&mut e, &s, &under, &w);
@@ -467,7 +468,7 @@ mod tests {
         let under = s.underlay().unwrap().clone();
         let w = wake();
         let mut sync = Engine::new(false);
-        sync.update(&s, &under, true, &no_views, &w);
+        sync.update(&s, s.active, &under, true, &no_views, &w);
         let mut bg = Engine::new(true);
         settle(&mut bg, &s, &under, &w);
         let rows = |e: &Engine| e.get(id).unwrap().result.as_ref().unwrap().rows.clone();
@@ -480,12 +481,12 @@ mod tests {
         let under = s.underlay().unwrap().clone();
         let w = wake();
         let mut e = Engine::new(true);
-        e.update(&s, &under, true, &no_views, &w);
+        e.update(&s, s.active, &under, true, &no_views, &w);
         s.apply(Action::Layer(id, OverlayChange::Threshold(4.5)));
         settle(&mut e, &s, &under, &w);
         settle(&mut e, &s, &under, &w);
         let mut sync = Engine::new(false);
-        sync.update(&s, &under, true, &no_views, &w);
+        sync.update(&s, s.active, &under, true, &no_views, &w);
         let total = |e: &Engine| e.get(id).unwrap().result.as_ref().unwrap().total_voxels;
         assert_eq!(total(&e), total(&sync));
         assert!(!e.get(id).unwrap().stale);

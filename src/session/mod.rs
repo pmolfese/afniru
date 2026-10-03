@@ -25,6 +25,38 @@ use afni_core::afni_colors::AfniColorScale;
 use crate::data::Dataset;
 use crate::geom::coords::{ijk_to_ras, ras_to_ijk};
 
+/// What is shared between controllers: moving the crosshair in one (and so
+/// its slices) moves it in the others, to the same place in the world; zooming
+/// and panning one zooms and pans the others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Links {
+    /// Crosshair and slices.
+    pub crosshair: bool,
+    /// Zoom and pan.
+    pub zoom: bool,
+}
+
+impl Default for Links {
+    /// Everything linked.
+    fn default() -> Self {
+        Self {
+            crosshair: true,
+            zoom: true,
+        }
+    }
+}
+
+/// One setting that differs between two controllers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Difference {
+    /// What differs ("threshold of overlay 1").
+    pub what: String,
+    /// The first controller's value.
+    pub a: String,
+    /// The second controller's value.
+    pub b: String,
+}
+
 /// Everything the viewer knows, apart from how it is drawn.
 #[derive(Debug)]
 pub struct Session {
@@ -39,6 +71,8 @@ pub struct Session {
     pub generation: u64,
     /// The color scale a new overlay starts with (`AFNI_COLORSCALE_DEFAULT`).
     pub colorscale: AfniColorScale,
+    /// What is linked between controllers.
+    pub links: Links,
     /// The number of overlay layers ever created: the next layer's id.
     next_layer: u64,
 }
@@ -52,6 +86,7 @@ impl Session {
             active: 0,
             generation: 0,
             colorscale: AfniColorScale::afni_default(),
+            links: Links::default(),
             next_layer: 0,
         }
     }
@@ -82,11 +117,26 @@ impl Session {
     /// first (copies: layers are small and datasets are shared). Layers whose
     /// dataset is missing are left out.
     pub fn overlay_layers(&self) -> Vec<(OverlayLayer, Arc<Dataset>)> {
-        self.controller()
-            .overlays
+        self.overlay_layers_of(self.active)
+    }
+
+    /// [`Session::overlay_layers`] for controller `ctl`.
+    pub fn overlay_layers_of(&self, ctl: usize) -> Vec<(OverlayLayer, Arc<Dataset>)> {
+        self.controllers
+            .get(ctl)
+            .map(|c| c.overlays.as_slice())
+            .unwrap_or_default()
             .iter()
             .filter_map(|l| self.store.get(l.dataset).map(|d| (l.clone(), d.clone())))
             .collect()
+    }
+
+    /// The layer with this id in any controller (ids are never shared).
+    pub fn layer_any(&self, id: LayerId) -> Option<&OverlayLayer> {
+        self.controllers
+            .iter()
+            .flat_map(|c| &c.overlays)
+            .find(|l| l.id == id)
     }
 
     /// The layer with this id in the active controller.
@@ -125,7 +175,13 @@ impl Session {
     /// A number that changes when the voxels layer `id` selects could change:
     /// its own selection and that of every layer its rule reads, through any
     /// number of others. The cache key of its clusters.
+    #[cfg(test)]
     pub fn selection_key(&self, id: LayerId) -> u64 {
+        self.selection_key_in(self.active, id)
+    }
+
+    /// [`Session::selection_key`] for a layer of controller `ctl`.
+    pub fn selection_key_in(&self, ctl: usize, id: LayerId) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         let mut seen: Vec<LayerId> = Vec::new();
@@ -135,7 +191,11 @@ impl Session {
                 continue;
             }
             seen.push(l);
-            if let Some(layer) = self.layer(l) {
+            if let Some(layer) = self
+                .controllers
+                .get(ctl)
+                .and_then(|c| c.overlays.iter().find(|x| x.id == l))
+            {
                 (l, layer.selection_key()).hash(&mut h);
                 if layer.as_mask {
                     pending.extend(layer.referenced_layers());
@@ -165,6 +225,196 @@ impl Session {
             }
         }
         false
+    }
+
+    /// The letter of controller `index`: A, B, C, ...
+    pub fn controller_name(index: usize) -> char {
+        (b'A' + (index % 26) as u8) as char
+    }
+
+    /// Copy controller `from` over controller `to` (or add it as a new one).
+    /// Layers get new ids, and rules that read a layer read its copy.
+    fn clone_controller(&mut self, from: usize, to: usize) {
+        let n = self.controllers.len();
+        if from >= n || to > n || from == to || to >= 26 {
+            return;
+        }
+        let mut copy = self.controllers[from].clone();
+        let mut renamed: Vec<(LayerId, LayerId)> = Vec::new();
+        for l in &mut copy.overlays {
+            self.next_layer += 1;
+            renamed.push((l.id, LayerId(self.next_layer)));
+            l.id = LayerId(self.next_layer);
+        }
+        let new_id = |old: LayerId| renamed.iter().find(|(o, _)| *o == old).map(|(_, n)| *n);
+        for l in &mut copy.overlays {
+            for b in l.bindings.values_mut() {
+                if let overlay::Binding::LayerMask(x) | overlay::Binding::LayerValue(x) = b
+                    && let Some(n) = new_id(*x)
+                {
+                    *x = n;
+                }
+            }
+        }
+        self.generation += 1;
+        copy.generation = self.generation;
+        let replaced = (to < n).then(|| self.datasets_of(to));
+        if to < n {
+            self.controllers[to] = copy;
+        } else {
+            self.controllers.push(copy);
+        }
+        self.active = to;
+        for d in replaced.into_iter().flatten() {
+            self.release_if_unused(d);
+        }
+    }
+
+    /// Remove controller `index` unless it is the only one.
+    fn remove_controller(&mut self, index: usize) {
+        if self.controllers.len() < 2 || index >= self.controllers.len() {
+            return;
+        }
+        let freed = self.datasets_of(index);
+        self.controllers.remove(index);
+        if self.active > index || self.active >= self.controllers.len() {
+            self.active = self.active.saturating_sub(1);
+        }
+        for d in freed {
+            self.release_if_unused(d);
+        }
+    }
+
+    /// The datasets controller `index` uses.
+    fn datasets_of(&self, index: usize) -> Vec<DatasetId> {
+        let c = &self.controllers[index];
+        let mut out: Vec<DatasetId> = c.underlay.into_iter().collect();
+        out.extend(c.series.source.into_iter().chain(c.series.fit));
+        for l in &c.overlays {
+            out.push(l.dataset);
+            out.extend(l.bindings.values().filter_map(|b| match b {
+                overlay::Binding::Sub { dataset, .. } => Some(*dataset),
+                _ => None,
+            }));
+        }
+        out.sort_by_key(|d| d.0);
+        out.dedup();
+        out
+    }
+
+    /// After the crosshair of controller `from` moved: move the others to the
+    /// same place in the world (where their underlay covers it), if the
+    /// crosshair is linked.
+    pub fn sync_crosshair(&mut self, from: usize) {
+        if !self.links.crosshair || from >= self.controllers.len() {
+            return;
+        }
+        let Some(ds) = self.controllers[from]
+            .underlay
+            .and_then(|id| self.store.get(id))
+        else {
+            return;
+        };
+        let ras = ijk_to_ras(&ds.ijk_to_ras, self.controllers[from].cursor.ijk);
+        for j in 0..self.controllers.len() {
+            if j == from {
+                continue;
+            }
+            let Some(other) = self.controllers[j]
+                .underlay
+                .and_then(|id| self.store.get(id))
+                .cloned()
+            else {
+                continue;
+            };
+            if let Some(ijk) = ras_to_ijk(&other.ijk_to_ras, other.dims, ras) {
+                self.controllers[j].cursor.ijk = ijk;
+            }
+        }
+    }
+
+    /// What differs between controllers `a` and `b`: the underlay, and each
+    /// overlay layer (matched by position) setting by setting.
+    pub fn differences(&self, a: usize, b: usize) -> Vec<Difference> {
+        let (Some(ca), Some(cb)) = (self.controllers.get(a), self.controllers.get(b)) else {
+            return Vec::new();
+        };
+        let name = |id: Option<DatasetId>| {
+            id.and_then(|i| self.store.get(i))
+                .map_or("none".to_string(), |d| d.name.clone())
+        };
+        let mut out = Vec::new();
+        let mut diff = |what: String, x: String, y: String| {
+            if x != y {
+                out.push(Difference { what, a: x, b: y });
+            }
+        };
+        diff("underlay".into(), name(ca.underlay), name(cb.underlay));
+        diff(
+            "underlay sub-brick".into(),
+            ca.underlay_sub_brick.to_string(),
+            cb.underlay_sub_brick.to_string(),
+        );
+        diff(
+            "number of overlays".into(),
+            ca.overlays.len().to_string(),
+            cb.overlays.len().to_string(),
+        );
+        for (n, (la, lb)) in ca.overlays.iter().zip(&cb.overlays).enumerate() {
+            let at = |what: &str| format!("{what} of overlay {}", n + 1);
+            diff(
+                at("dataset"),
+                name(Some(la.dataset)),
+                name(Some(lb.dataset)),
+            );
+            diff(
+                at("OLay / Thr"),
+                format!("#{} / #{}", la.olay_sub, la.thr_sub),
+                format!("#{} / #{}", lb.olay_sub, lb.thr_sub),
+            );
+            diff(
+                at("threshold"),
+                la.threshold.to_string(),
+                lb.threshold.to_string(),
+            );
+            diff(
+                at("color scale"),
+                la.colorscale.name().into(),
+                lb.colorscale.name().into(),
+            );
+            diff(at("± or +"), la.signed.to_string(), lb.signed.to_string());
+            diff(
+                at("range"),
+                format!("{:?}", la.range),
+                format!("{:?}", lb.range),
+            );
+            diff(
+                at("opacity"),
+                format!("{:.2}", la.opacity),
+                format!("{:.2}", lb.opacity),
+            );
+            diff(
+                at("visible"),
+                la.visible.to_string(),
+                lb.visible.to_string(),
+            );
+            diff(
+                at("A / B"),
+                format!("{} / {}", la.fade, la.boxed),
+                format!("{} / {}", lb.fade, lb.boxed),
+            );
+            diff(
+                at("shown as mask"),
+                la.as_mask.to_string(),
+                lb.as_mask.to_string(),
+            );
+            diff(
+                at("Clusterize"),
+                format!("{:?}", la.cluster),
+                format!("{:?}", lb.cluster),
+            );
+        }
+        out
     }
 
     /// Is dataset `id` the underlay, a layer's dataset, read by a rule, or
@@ -317,15 +567,27 @@ impl Session {
                 c.underlay = Some(id);
                 c.underlay_sub_brick = 0;
                 self.generation += 1;
+                let g = self.generation;
+                self.controller_mut().generation = g;
                 // The dataset being replaced is not kept in memory.
                 if let Some(old) = old {
                     self.release_if_unused(old);
                 }
             }
+            Action::SelectController(i) => {
+                if i < self.controllers.len() {
+                    self.active = i;
+                }
+            }
+            Action::CloneController { from, to } => self.clone_controller(from, to),
+            Action::RemoveController(i) => self.remove_controller(i),
+            Action::SetLinks(links) => self.links = links,
             Action::SetUnderlaySubBrick(t) => {
                 if self.underlay().is_some_and(|ds| t < ds.nvols) {
                     self.controller_mut().underlay_sub_brick = t;
                     self.generation += 1;
+                    let g = self.generation;
+                    self.controller_mut().generation = g;
                 }
             }
             Action::MoveCrosshair(ijk) => {
@@ -944,5 +1206,170 @@ mod tests {
             "the replaced layer dataset is freed"
         );
         assert!(s.store.get(other).is_some());
+    }
+
+    // ---- Controllers ----
+
+    fn cloned() -> (Session, DatasetId, DatasetId) {
+        let (mut s, over, id) = with_overlay();
+        // A rule in the layer that reads another layer.
+        s.apply(Action::AddOverlay(over));
+        let second = s.controller().overlays[1].id;
+        change(&mut s, second, OverlayChange::MaskMode(true));
+        change(
+            &mut s,
+            second,
+            OverlayChange::MaskRule(MaskRule::Expression("c".into())),
+        );
+        change(
+            &mut s,
+            second,
+            OverlayChange::Bind('c', Some(Binding::LayerMask(id))),
+        );
+        let under = s.controller().underlay.unwrap();
+        s.apply(Action::CloneController { from: 0, to: 1 });
+        (s, under, over)
+    }
+
+    #[test]
+    fn cloning_copies_the_controller_shares_the_datasets_and_makes_new_layer_ids() {
+        let (s, under, over) = cloned();
+        assert_eq!(s.controllers.len(), 2);
+        assert_eq!(s.active, 1, "the copy becomes the active controller");
+        let (a, b) = (&s.controllers[0], &s.controllers[1]);
+        assert_eq!((a.underlay, b.underlay), (Some(under), Some(under)));
+        assert_eq!(a.overlays.len(), b.overlays.len());
+        assert!(b.overlays.iter().all(|l| l.dataset == over));
+        // New ids, none shared; the copy's rule reads the copy's layer.
+        let ids_a: Vec<_> = a.overlays.iter().map(|l| l.id).collect();
+        let ids_b: Vec<_> = b.overlays.iter().map(|l| l.id).collect();
+        assert!(ids_b.iter().all(|i| !ids_a.contains(i)));
+        assert_eq!(b.overlays[1].bindings[&'c'], Binding::LayerMask(ids_b[0]));
+        assert_eq!(a.overlays[1].bindings[&'c'], Binding::LayerMask(ids_a[0]));
+        // Same voxels, not a second copy of them.
+        assert_eq!(s.store.iter().count(), 2);
+        // A settings change in one does not touch the other.
+        let mut s = s;
+        change(&mut s, ids_b[0], OverlayChange::Threshold(4.2));
+        assert_eq!(s.controllers[0].overlays[0].threshold, 0.0);
+        assert_eq!(s.controllers[1].overlays[0].threshold, 4.2);
+    }
+
+    #[test]
+    fn cloning_over_an_existing_controller_replaces_it_and_bad_requests_do_nothing() {
+        let (mut s, _, _) = cloned();
+        s.apply(Action::SelectController(1));
+        let id = s.controller().overlays[0].id;
+        change(&mut s, id, OverlayChange::Threshold(7.0));
+        s.apply(Action::CloneController { from: 0, to: 1 }); // push A onto B
+        assert_eq!(s.controllers.len(), 2);
+        assert_eq!(s.controllers[1].overlays[0].threshold, 0.0);
+        for bad in [
+            Action::CloneController { from: 0, to: 0 },
+            Action::CloneController { from: 5, to: 1 },
+            Action::CloneController { from: 0, to: 9 },
+            Action::SelectController(7),
+            Action::RemoveController(9),
+        ] {
+            let before = (s.controllers.len(), s.active);
+            s.apply(bad);
+            assert_eq!((s.controllers.len(), s.active), before);
+        }
+    }
+
+    #[test]
+    fn removing_a_controller_keeps_the_others_and_frees_what_only_it_used() {
+        let (mut s, _, over) = cloned();
+        // B uses its own dataset too.
+        let extra = s.store.add(synthetic::tmap());
+        s.apply(Action::AddOverlay(extra)); // active is B
+        s.apply(Action::RemoveController(1));
+        assert_eq!(s.controllers.len(), 1);
+        assert_eq!(s.active, 0);
+        assert!(s.store.get(extra).is_none(), "only B used it");
+        assert!(s.store.get(over).is_some(), "A still uses it");
+        s.apply(Action::RemoveController(0)); // the last one stays
+        assert_eq!(s.controllers.len(), 1);
+    }
+
+    #[test]
+    fn removing_a_controller_before_the_active_one_keeps_the_same_one_active() {
+        let (mut s, _, _) = cloned();
+        s.apply(Action::CloneController { from: 1, to: 2 }); // A, B, C; C active
+        assert_eq!(s.active, 2);
+        s.apply(Action::RemoveController(0));
+        assert_eq!((s.controllers.len(), s.active), (2, 1));
+    }
+
+    #[test]
+    fn controllers_have_their_own_generation() {
+        let (mut s, _, _) = cloned();
+        let (ga, gb) = (s.controllers[0].generation, s.controllers[1].generation);
+        assert_ne!(ga, gb);
+        let t = s.store.add(synthetic::phantom());
+        s.apply(Action::SetUnderlay(t)); // B is active
+        assert_eq!(s.controllers[0].generation, ga, "A is untouched");
+        assert_ne!(s.controllers[1].generation, gb);
+        assert_eq!(Session::controller_name(0), 'A');
+        assert_eq!(Session::controller_name(2), 'C');
+    }
+
+    #[test]
+    fn a_linked_crosshair_moves_the_others_to_the_same_place_in_the_world() {
+        let (mut s, _, _) = cloned();
+        // Controller B looks at a coarser grid covering the same world.
+        let (bold, _) = synthetic::bold();
+        let coarse = s.store.add(bold);
+        s.apply(Action::SetUnderlay(coarse)); // B (active)
+        s.apply(Action::SelectController(0));
+        s.apply(Action::MoveCrosshair([100, 60, 30])); // A, on the 1 mm grid
+        s.sync_crosshair(0);
+        let ras_a = ijk_to_ras(
+            &s.store
+                .get(s.controllers[0].underlay.unwrap())
+                .unwrap()
+                .ijk_to_ras,
+            s.controllers[0].cursor.ijk,
+        );
+        let b = s.store.get(coarse).unwrap().clone();
+        let ras_b = ijk_to_ras(&b.ijk_to_ras, s.controllers[1].cursor.ijk);
+        // B's voxel is within half a (5 mm) voxel of the same world point.
+        for a in 0..3 {
+            assert!(
+                (ras_a[a] - ras_b[a]).abs() <= 2.5 + 1e-6,
+                "{ras_a:?} {ras_b:?}"
+            );
+        }
+        // Linking off: B stays where it is.
+        s.apply(Action::SetLinks(Links {
+            crosshair: false,
+            zoom: true,
+        }));
+        let before = s.controllers[1].cursor.ijk;
+        s.apply(Action::MoveCrosshair([10, 10, 10]));
+        s.sync_crosshair(0);
+        assert_eq!(s.controllers[1].cursor.ijk, before);
+    }
+
+    #[test]
+    fn differences_list_what_changed_between_two_controllers() {
+        let (mut s, _, _) = cloned();
+        assert!(s.differences(0, 1).is_empty(), "a clone differs in nothing");
+        let id = s.controllers[1].overlays[0].id;
+        s.apply(Action::SelectController(1));
+        change(&mut s, id, OverlayChange::Threshold(3.1));
+        change(&mut s, id, OverlayChange::Signed(false));
+        let d = s.differences(0, 1);
+        let whats: Vec<&str> = d.iter().map(|x| x.what.as_str()).collect();
+        assert_eq!(whats, ["threshold of overlay 1", "± or + of overlay 1"]);
+        assert_eq!((d[0].a.as_str(), d[0].b.as_str()), ("0", "3.1"));
+        // An extra layer shows as a count (and only the common layers are compared).
+        s.apply(Action::AddOverlay(DatasetId(1)));
+        assert!(
+            s.differences(0, 1)
+                .iter()
+                .any(|x| x.what == "number of overlays")
+        );
+        assert!(s.differences(0, 9).is_empty());
     }
 }

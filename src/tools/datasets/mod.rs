@@ -70,19 +70,9 @@ impl Tool for DatasetsTool {
 
                 ui.label(RichText::new("Sub-brick").color(theme.text_dim));
                 let shown = cx.controller.underlay_sub_brick;
-                ComboBox::from_id_salt("ulay_sub")
-                    .width(ui.available_width())
-                    .selected_text(sub_brick_text(ds, shown))
-                    .show_ui(ui, |ui| {
-                        for t in 0..ds.nvols {
-                            if ui
-                                .selectable_label(shown == t, sub_brick_text(ds, t))
-                                .clicked()
-                            {
-                                actions.push(Action::SetUnderlaySubBrick(t));
-                            }
-                        }
-                    });
+                if let Some(t) = sub_brick_combo(ui, "ulay_sub", ds, shown, ui.available_width()) {
+                    actions.push(Action::SetUnderlaySubBrick(t));
+                }
                 ui.end_row();
             });
 
@@ -390,19 +380,31 @@ pub(crate) fn dataset_items(
                     || folder.dir.display().to_string(),
                     |n| n.to_string_lossy().into(),
                 );
-                section(
-                    ui,
-                    format!("{} {name}", icon::FOLDER_OPEN),
-                    entries
-                        .iter()
-                        .filter(|e| {
-                            shown(&e.label)
-                                && !is_loaded(cx, &e.path)
-                                && !recent.iter().any(|r| **r == e.path)
-                        })
-                        .map(|e| (e.label.clone(), e.path.as_path()))
-                        .collect(),
-                );
+                // One section per subfolder (a recursive listing has several),
+                // each headed by the folder's name.
+                let mut groups: Vec<&str> = entries.iter().map(|e| e.group.as_str()).collect();
+                groups.dedup();
+                for group in groups {
+                    let heading = if group.is_empty() {
+                        format!("{} {name}", icon::FOLDER_OPEN)
+                    } else {
+                        format!("{} {name}/{group}", icon::FOLDER_OPEN)
+                    };
+                    section(
+                        ui,
+                        heading,
+                        entries
+                            .iter()
+                            .filter(|e| {
+                                e.group == group
+                                    && (shown(&e.label) || shown(&e.group))
+                                    && !is_loaded(cx, &e.path)
+                                    && !recent.iter().any(|r| **r == e.path)
+                            })
+                            .map(|e| (e.label.clone(), e.path.as_path()))
+                            .collect(),
+                    );
+                }
             }
             if !any {
                 ui.label(
@@ -430,6 +432,11 @@ fn folder_rows(ui: &mut Ui, cx: &ToolContext) -> Vec<Action> {
                 (_, Some(e)) => e.clone(),
                 (None, _) => "reading…".to_string(),
                 (Some(e), _) if e.is_empty() => "no AFNI or NIfTI datasets".to_string(),
+                (Some(e), _) if folder.recursive => {
+                    let mut groups: Vec<&str> = e.iter().map(|x| x.group.as_str()).collect();
+                    groups.dedup();
+                    format!("{} datasets in {} folders", e.len(), groups.len())
+                }
                 (Some(e), _) => format!("{} datasets", e.len()),
             };
             ui.label(
@@ -625,6 +632,65 @@ fn layer_list(ui: &mut Ui, cx: &ToolContext) -> Vec<Action> {
 /// the top-first list of the other `others` layers (slot 0 = the very top).
 pub fn stack_position(others: usize, slot: usize) -> usize {
     others - slot.min(others)
+}
+
+/// A combo box that picks a sub-brick of `ds`, written `#3 label`. A dataset with
+/// many sub-bricks (a time series of hundreds) gets a filter box that matches the
+/// index or the label, and the list is drawn row by row so it stays fast. The
+/// list stays open while you type and closes when you choose. Returns the
+/// sub-brick chosen this frame.
+pub(crate) fn sub_brick_combo(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    ds: &Dataset,
+    current: usize,
+    width: f32,
+) -> Option<usize> {
+    let mut picked = None;
+    ComboBox::from_id_salt(id)
+        .width(width)
+        .selected_text(sub_brick_text(ds, current))
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show_ui(ui, |ui| {
+            let filter_id = ui.id().with("sub_brick_filter");
+            let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
+            if ds.nvols > 12 {
+                ui.add(
+                    egui::TextEdit::singleline(&mut filter)
+                        .hint_text("filter by number or label")
+                        .desired_width(240.0),
+                );
+                ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
+            } else {
+                filter.clear();
+            }
+            let needle = filter.trim().to_lowercase();
+            let shown: Vec<usize> = (0..ds.nvols)
+                .filter(|&t| {
+                    needle.is_empty() || sub_brick_text(ds, t).to_lowercase().contains(&needle)
+                })
+                .collect();
+            if shown.is_empty() {
+                ui.label(RichText::new("no match").small());
+                return;
+            }
+            let row = ui.spacing().interact_size.y;
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .auto_shrink([true, true])
+                .show_rows(ui, row, shown.len(), |ui, rows| {
+                    for &t in &shown[rows] {
+                        if ui
+                            .selectable_label(current == t, sub_brick_text(ds, t))
+                            .clicked()
+                        {
+                            picked = Some(t);
+                            ui.close();
+                        }
+                    }
+                });
+        });
+    picked
 }
 
 /// `#3 label`, as AFNI's sub-brick chooser writes it.

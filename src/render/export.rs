@@ -141,11 +141,20 @@ fn text_px(height: usize, fraction: f32) -> f32 {
 
 /// Draw the slice number in its corner (white with a dark outline), at the
 /// size the label asks for. The text is smooth, however big.
-pub fn draw_slice_number(img: &mut Rgba8Image, number: usize, label: &SliceLabel) {
+///
+/// `reference` is the height the text size is measured against: pass the same
+/// height for every picture of a figure and the numbers come out the same
+/// size in all of them, whatever their own heights (`None`: the picture's own).
+pub fn draw_slice_number(
+    img: &mut Rgba8Image,
+    number: usize,
+    label: &SliceLabel,
+    reference: Option<usize>,
+) {
     if !label.show {
         return;
     }
-    let px = text_px(img.height, label.size.fraction());
+    let px = text_px(reference.unwrap_or(img.height), label.size.fraction());
     let text = number.to_string();
     let (w, h) = text::measure(&text, px);
     let margin = (px * 0.35) as i64;
@@ -171,8 +180,16 @@ pub fn draw_slice_number(img: &mut Rgba8Image, number: usize, label: &SliceLabel
 
 /// The picture inside a frame that carries the orientation letters (left,
 /// right, top, bottom) on its four sides.
-pub fn with_letters(img: &Rgba8Image, letters: [char; 4], background: [u8; 3]) -> Rgba8Image {
-    let px = text_px(img.height, 0.05);
+///
+/// `reference` is as for [`draw_slice_number`]: the same height for every
+/// picture of a figure gives letters of the same size in all of them.
+pub fn with_letters(
+    img: &Rgba8Image,
+    letters: [char; 4],
+    background: [u8; 3],
+    reference: Option<usize>,
+) -> Rgba8Image {
+    let px = text_px(reference.unwrap_or(img.height), 0.05);
     let (gw, gh) = text::measure("W", px);
     let pad = gw.max(gh) + (px * 0.6) as usize;
     let mut out = Rgba8Image::filled(img.width + 2 * pad, img.height + 2 * pad, background);
@@ -305,6 +322,8 @@ pub enum ExportWhat {
     Views(ViewsLayout),
     /// A montage of slices of one plane.
     Montage(MontageSpec),
+    /// The Graph (the time series at the crosshair) on its own.
+    Graph,
 }
 
 /// Look of the saved pictures.
@@ -318,6 +337,9 @@ pub struct ExportOptions {
     pub crosshair: bool,
     /// The slice number (where and how big as on screen; `show` off leaves it out).
     pub label: SliceLabel,
+    /// Include the Graph with the three views (as a fourth picture in a row or
+    /// column, in its cell of the 2×2 grid, or as its own file).
+    pub graph: bool,
 }
 
 impl Default for ExportOptions {
@@ -327,6 +349,7 @@ impl Default for ExportOptions {
             letters: true,
             crosshair: false,
             label: SliceLabel::default(),
+            graph: false,
         }
     }
 }
@@ -413,7 +436,7 @@ mod tests {
                 corner,
                 size: LabelSize::Large,
             };
-            draw_slice_number(&mut img, 75, &label);
+            draw_slice_number(&mut img, 75, &label, None);
             let (left, top) = (
                 matches!(corner, Corner::TopLeft | Corner::BottomLeft),
                 matches!(corner, Corner::TopLeft | Corner::TopRight),
@@ -437,7 +460,7 @@ mod tests {
                 corner: Corner::TopLeft,
                 size,
             };
-            draw_slice_number(&mut img, 8, &label);
+            draw_slice_number(&mut img, 8, &label, None);
             (0..300)
                 .flat_map(|y| (0..300).map(move |x| (x, y)))
                 .filter(|&(x, y)| img.get(x, y)[0] >= 200)
@@ -449,9 +472,50 @@ mod tests {
     }
 
     #[test]
+    fn a_shared_reference_height_gives_the_same_text_size_to_pictures_of_different_heights() {
+        let label = SliceLabel {
+            show: true,
+            corner: Corner::TopLeft,
+            size: LabelSize::Large,
+        };
+        // Height of the white-ish text in the top left corner.
+        let text_height = |img: &Rgba8Image| {
+            (0..img.height)
+                .filter(|&y| (0..img.width / 2).any(|x| img.get(x, y)[0] >= 200))
+                .count()
+        };
+        let mut short = solid(300, 150, [60, 60, 60]);
+        let mut tall = solid(300, 400, [60, 60, 60]);
+        draw_slice_number(&mut short, 96, &label, Some(400));
+        draw_slice_number(&mut tall, 96, &label, Some(400));
+        assert_eq!(text_height(&short), text_height(&tall));
+        // Without a shared reference the taller picture gets bigger text.
+        let mut short = solid(300, 150, [60, 60, 60]);
+        let mut tall = solid(300, 400, [60, 60, 60]);
+        draw_slice_number(&mut short, 96, &label, None);
+        draw_slice_number(&mut tall, 96, &label, None);
+        assert!(text_height(&tall) > text_height(&short));
+        // The same holds for the orientation letters' frame.
+        let a = with_letters(
+            &solid(100, 50, [9, 9, 9]),
+            ['R', 'L', 'A', 'P'],
+            [0, 0, 0],
+            Some(300),
+        );
+        let b = with_letters(
+            &solid(100, 200, [9, 9, 9]),
+            ['R', 'L', 'A', 'P'],
+            [0, 0, 0],
+            Some(300),
+        );
+        assert_eq!(a.width - 100, b.width - 100);
+        assert_eq!(a.height - 50, b.height - 200);
+    }
+
+    #[test]
     fn letters_frame_the_picture_without_covering_it() {
         let img = solid(40, 30, [100, 100, 100]);
-        let framed = with_letters(&img, ['R', 'L', 'A', 'P'], [0, 0, 0]);
+        let framed = with_letters(&img, ['R', 'L', 'A', 'P'], [0, 0, 0], None);
         assert!(framed.width > 40 && framed.height > 30);
         let pad = (framed.width - 40) / 2;
         assert_eq!(framed.get(pad + 5, pad + 5), [100, 100, 100]); // the picture is intact

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use afni_core::color::Rgba;
 use egui::{
     Align2, Color32, ColorImage, FontId, Pos2, Rect, RichText, Sense, Stroke, TextureHandle,
-    TextureOptions, Ui, pos2, vec2,
+    TextureOptions, Ui, Vec2, pos2, vec2,
 };
 
 use super::theme::{self, Theme};
@@ -46,6 +46,8 @@ pub struct CardEvents {
     pub label: Option<SliceLabel>,
     /// Saving images, and the like, for the app to carry out.
     pub actions: Vec<SessionAction>,
+    /// A new zoom factor (the zoom is shared by the three views).
+    pub zoom: Option<f32>,
 }
 
 /// What every card needs to draw, shared by the three planes.
@@ -62,6 +64,8 @@ pub struct CardContext<'a> {
     pub generation: u64,
     /// Layout, crosshair and orientation options.
     pub options: ViewOptions,
+    /// Zoom: 1 fits the image in the card, more magnifies it.
+    pub zoom: f32,
     /// The overlay layers to draw over the underlay, bottom first.
     pub overlays: Vec<OverlayView<'a>>,
     /// Dataset sub-bricks on the underlay grid that mask rules read.
@@ -168,6 +172,9 @@ pub fn plane_color(plane: Plane) -> Color32 {
 pub struct PlaneCard {
     plane: Plane,
     texture: Option<(TexKey, TextureHandle)>,
+    /// How far the image is moved from the center when zoomed, as a fraction
+    /// of the fitted image's size (so it means the same in any controller).
+    pub pan: Vec2,
 }
 
 impl PlaneCard {
@@ -176,6 +183,7 @@ impl PlaneCard {
         Self {
             plane,
             texture: None,
+            pan: Vec2::ZERO,
         }
     }
 
@@ -222,7 +230,7 @@ impl PlaneCard {
                 left_is_left,
                 overlay: overlay_key(&cx.overlays),
             };
-            self.paint_slice(ui, cx, canvas, &response, &map, &s, key, cur);
+            self.paint_slice(ui, cx, canvas, &response, &map, &s, key, cur, &mut events);
         }
 
         ui.add_space(4.0);
@@ -315,6 +323,7 @@ impl PlaneCard {
         s: &Slice,
         key: TexKey,
         cur: &mut Cursor,
+        events: &mut CardEvents,
     ) {
         // Upload only when something changed.
         let image = || {
@@ -352,7 +361,44 @@ impl PlaneCard {
         if fit <= 0.0 || !fit.is_finite() {
             return;
         }
-        let rect = Rect::from_center_size(canvas.center(), mm * fit);
+        // Zoom and pan: Ctrl+scroll or a pinch zooms around the pointer, scroll
+        // pans a zoomed image, a double-click shows the whole image again.
+        let base = mm * fit;
+        let to_px = |p: Vec2| vec2(p.x * base.x, p.y * base.y);
+        let to_frac = |p: Vec2| vec2(p.x / base.x, p.y / base.y);
+        let mut zoom = cx.zoom;
+        let mut pan = self.pan;
+        if response.hovered() {
+            let (zoom_delta, scroll, command) =
+                ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta, i.modifiers.command));
+            if (zoom_delta - 1.0).abs() > 1e-4 {
+                let z1 = (zoom * zoom_delta).clamp(1.0, 16.0);
+                if (z1 - zoom).abs() > 1e-6 {
+                    if let Some(p) = response.hover_pos() {
+                        // The point under the pointer stays where it is.
+                        let old = canvas.center() + to_px(pan);
+                        let new = p + (old - p) * (z1 / zoom);
+                        pan = to_frac(new - canvas.center());
+                    }
+                    zoom = z1;
+                    events.zoom = Some(z1);
+                }
+            } else if zoom > 1.0 && !command && scroll != Vec2::ZERO {
+                pan += to_frac(scroll);
+            }
+        }
+        if response.double_clicked() && zoom != 1.0 {
+            zoom = 1.0;
+            events.zoom = Some(1.0);
+        }
+        if zoom <= 1.0 {
+            pan = Vec2::ZERO;
+        } else {
+            let lim = zoom * 0.5;
+            pan = vec2(pan.x.clamp(-lim, lim), pan.y.clamp(-lim, lim));
+        }
+        self.pan = pan;
+        let rect = Rect::from_center_size(canvas.center() + to_px(pan), base * zoom);
 
         // Click or drag: move the crosshair to the voxel under the pointer.
         if let Some(p) = response
@@ -380,44 +426,73 @@ impl PlaneCard {
             Color32::from_gray(200)
         };
         let font = FontId::proportional(13.0);
-        let c = rect.center();
+        // The side letters name the edges of what is in view: of the image
+        // when it fits, of the card when it is zoomed.
+        let edge = if zoom > 1.0 {
+            rect.intersect(canvas.shrink(14.0))
+        } else {
+            rect
+        };
+        let c = edge.center();
+        let out = if zoom > 1.0 { -14.0 } else { 6.0 };
         painter.text(
-            pos2(rect.left() - 6.0, c.y),
-            Align2::RIGHT_CENTER,
+            pos2(edge.left() - out, c.y),
+            if zoom > 1.0 {
+                Align2::LEFT_CENTER
+            } else {
+                Align2::RIGHT_CENTER
+            },
             s.left,
             font.clone(),
             ink,
         );
         painter.text(
-            pos2(rect.right() + 6.0, c.y),
-            Align2::LEFT_CENTER,
+            pos2(edge.right() + out, c.y),
+            if zoom > 1.0 {
+                Align2::RIGHT_CENTER
+            } else {
+                Align2::LEFT_CENTER
+            },
             s.right,
             font.clone(),
             ink,
         );
         painter.text(
-            pos2(c.x, rect.top() - 4.0),
-            Align2::CENTER_BOTTOM,
+            pos2(c.x, edge.top() - if zoom > 1.0 { -4.0 } else { 4.0 }),
+            if zoom > 1.0 {
+                Align2::CENTER_TOP
+            } else {
+                Align2::CENTER_BOTTOM
+            },
             s.top,
             font.clone(),
             ink,
         );
         painter.text(
-            pos2(c.x, rect.bottom() + 4.0),
-            Align2::CENTER_TOP,
+            pos2(c.x, edge.bottom() + if zoom > 1.0 { -4.0 } else { 4.0 }),
+            if zoom > 1.0 {
+                Align2::CENTER_BOTTOM
+            } else {
+                Align2::CENTER_TOP
+            },
             s.bottom,
             font,
             ink,
         );
         let label = cx.options.slice_label;
         if label.show {
-            slice_number(&painter, rect, key_index(cur, map), &label);
+            let shown = if zoom > 1.0 {
+                rect.intersect(canvas)
+            } else {
+                rect
+            };
+            slice_number(&painter, shown, key_index(cur, map), &label);
         }
-        scale_bar(&painter, canvas, fit, ink);
+        scale_bar(&painter, canvas, fit * zoom, ink);
         painter.text(
             pos2(canvas.right() - 8.0, canvas.bottom() - 8.0),
             Align2::RIGHT_BOTTOM,
-            format!("{:.0}%", fit as f64 * s.pixel_mm[0] * 100.0),
+            format!("{:.0}%", (fit * zoom) as f64 * s.pixel_mm[0] * 100.0),
             FontId::proportional(11.0),
             ink,
         );
@@ -524,6 +599,7 @@ pub fn export_tile(
     px_per_mm: f64,
     letters: bool,
     background: [u8; 3],
+    text_reference: Option<usize>,
 ) -> Option<Rgba8Image> {
     let ds = cx.ds;
     let left_is_left = cx.options.left_is_left;
@@ -560,11 +636,40 @@ pub fn export_tile(
             i64::from((opts.zoom / 4).max(1)),
         );
     }
-    export::draw_slice_number(&mut img, index, &opts.label);
+    export::draw_slice_number(&mut img, index, &opts.label, text_reference);
     if letters {
-        img = export::with_letters(&img, [s.left, s.right, s.top, s.bottom], background);
+        img = export::with_letters(
+            &img,
+            [s.left, s.right, s.top, s.bottom],
+            background,
+            text_reference,
+        );
     }
     Some(img)
+}
+
+/// The size in pixels of slice `index` of `plane` as it is saved (before the
+/// letters), so a figure can share one text size across its pictures.
+pub fn tile_size(
+    cx: &CardContext,
+    plane: Plane,
+    index: usize,
+    px_per_mm: f64,
+) -> Option<(usize, usize)> {
+    let ds = cx.ds;
+    let s = slice::extract(
+        cx.frame,
+        ds.dims,
+        ds.voxel_mm,
+        &ds.orient,
+        plane,
+        index,
+        cx.options.left_is_left,
+    )?;
+    Some((
+        ((s.width as f64 * s.pixel_mm[0] * px_per_mm).round() as usize).max(1),
+        ((s.height as f64 * s.pixel_mm[1] * px_per_mm).round() as usize).max(1),
+    ))
 }
 
 /// The slice index shown in `map`'s plane.
@@ -745,6 +850,7 @@ mod tests {
                 slice_label: SliceLabel::default(),
             },
             sub_frames: &HashMap::new(),
+            zoom: 1.0,
             overlays: vec![
                 OverlayView {
                     layer: &a,

@@ -8,7 +8,7 @@ use afni_core::calc::Expr;
 use egui::{ComboBox, DragValue, RichText, Slider, TextEdit, Ui};
 use egui_phosphor::regular as icon;
 
-use super::datasets::{Picks, dataset_combo, dataset_menu, sub_brick_text};
+use super::datasets::{Picks, dataset_combo, dataset_menu, sub_brick_combo};
 use super::{Instance, Tool, ToolContext, ToolId};
 use crate::render::overlay::range_top;
 use crate::session::overlay::{Binding, Coord, MaskRule, OverlayChange};
@@ -565,27 +565,23 @@ impl OverlayTool {
                     ("Thr", layer.thr_sub, false),
                 ] {
                     ui.label(RichText::new(label).color(cx.theme.text_dim));
-                    ComboBox::from_id_salt((label, layer.id.0))
-                        .width(ui.available_width())
-                        .selected_text(sub_brick_text(o.dataset, current))
-                        .show_ui(ui, |ui| {
-                            for t in 0..o.dataset.nvols {
-                                if ui
-                                    .selectable_label(current == t, sub_brick_text(o.dataset, t))
-                                    .clicked()
-                                {
-                                    let (olay, thr) = if is_olay {
-                                        (t, layer.thr_sub)
-                                    } else {
-                                        (layer.olay_sub, t)
-                                    };
-                                    actions.push(Action::Layer(
-                                        layer.id,
-                                        OverlayChange::SubBricks { olay, thr },
-                                    ));
-                                }
-                            }
-                        });
+                    if let Some(t) = sub_brick_combo(
+                        ui,
+                        (label, layer.id.0),
+                        o.dataset,
+                        current,
+                        ui.available_width(),
+                    ) {
+                        let (olay, thr) = if is_olay {
+                            (t, layer.thr_sub)
+                        } else {
+                            (layer.olay_sub, t)
+                        };
+                        actions.push(Action::Layer(
+                            layer.id,
+                            OverlayChange::SubBricks { olay, thr },
+                        ));
+                    }
                     ui.end_row();
                 }
             });

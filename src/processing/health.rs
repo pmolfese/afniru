@@ -147,10 +147,12 @@ fn present(step: &ProcessingStep, later_output: bool) -> Option<HealthEvidence> 
     if expected.is_empty() {
         return None;
     }
-    let missing: Vec<&str> = expected
+    // Each missing output with the script line that declares it, so the cause
+    // can be found in the script (an empty name is shown as "").
+    let missing: Vec<String> = expected
         .iter()
         .filter(|a| !a.exists)
-        .map(|a| a.name.as_str())
+        .map(|a| format!("\"{}\" from {}", a.name, a.source.detail))
         .collect();
     let total = expected.len();
     let (health, finding) = if missing.is_empty() {
@@ -185,8 +187,13 @@ fn present(step: &ProcessingStep, later_output: bool) -> Option<HealthEvidence> 
 }
 
 /// At most three names, then a count.
-fn list(names: &[&str]) -> String {
-    let mut s = names.iter().take(3).copied().collect::<Vec<_>>().join(", ");
+fn list<S: AsRef<str>>(names: &[S]) -> String {
+    let mut s = names
+        .iter()
+        .take(3)
+        .map(AsRef::as_ref)
+        .collect::<Vec<_>>()
+        .join(", ");
     if names.len() > 3 {
         s.push_str(&format!(", +{} more", names.len() - 3));
     }

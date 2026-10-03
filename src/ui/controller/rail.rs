@@ -9,7 +9,7 @@ use egui_phosphor::regular as icon;
 
 use super::card_frame::{CardHeader, show_card};
 use super::workspace::Workspace;
-use crate::session::Action;
+use crate::session::{Action, Session};
 use crate::tools::{ToolContext, ToolId};
 
 /// Width of the rail panel.
@@ -43,7 +43,7 @@ pub fn rail(
         ui.painter().text(
             rect.center(),
             Align2::CENTER_CENTER,
-            "A",
+            Session::controller_name(cx.session.active).to_string(),
             FontId::proportional(14.0),
             egui::Color32::BLACK,
         );

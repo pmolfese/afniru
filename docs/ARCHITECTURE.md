@@ -31,6 +31,8 @@ file describes only what exists now, and grows with the code.
 | `session/graph.rs` | The tool dependency graph (`parent`, `children`, `downstream`), read from `Tool::attaches_to`. |
 | `tools/clusterize/` | Clusterize, hooked under Define Overlay per layer: `compute.rs` (inputs for `afni_core::volume_cluster`, matches `3dClusterize`), `engine.rs` (cache; reruns on selection changes, not while the mouse is down), the card. |
 | `ui/controller/hooks.rs`, `ui/widgets/chips.rs` | The spine/socket and stacked edge of hooked cards; the attach chips in a card's footer. |
+| `session/` controllers | `Session::controllers` holds A, B, …; `Action::CloneController`, `SelectController`, `RemoveController`, `SetLinks`; `sync_crosshair` (linked crosshair through world coordinates) and `differences`. Each controller has its own `generation`; `App` keeps a `ViewArea` and a cluster `Engine` per controller. |
+| `render/graph_image.rs`, `render/text.rs` | The Graph and smooth text (slice numbers, letters) as pixels for saved images. |
 | `ui/fonts.rs` | Installs the Phosphor icon font once per context. |
 | `ui/shell.rs` | Menu bar, toolbar, status bar. Draws and returns an `Action`; never mutates the session. |
 

@@ -40,4 +40,8 @@ pub struct ControllerState {
     pub overlays: Vec<OverlayLayer>,
     /// What the Graph view plots.
     pub series: SeriesSettings,
+    /// Changes whenever this controller's underlay or sub-brick does: the cache
+    /// key of its views (the value comes from the session's counter, so two
+    /// controllers never share one).
+    pub generation: u64,
 }

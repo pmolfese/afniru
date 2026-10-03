@@ -118,18 +118,22 @@ fn pointer_in(ctx: &egui::Context, rect: Rect) -> bool {
 
 /// The pop-up under a traffic light: the step, its state and why, and an
 /// invitation to click. Returns its rectangle and whether it was clicked.
+///
+/// It opens to the *left* of the rail, level with the light, so it never covers
+/// the steps below or above it.
 fn status_popup(
     ctx: &egui::Context,
     theme: &Theme,
     step: &ProcessingStep,
     anchor: Rect,
+    rail_left: f32,
 ) -> (Rect, bool) {
     let health = step.assessment.health;
     let mut clicked = false;
     let area = egui::Area::new(Id::new("processing_status_popup"))
         .order(egui::Order::Tooltip)
-        .pivot(Align2::RIGHT_TOP)
-        .fixed_pos(pos2(anchor.right() + 6.0, anchor.bottom() + 6.0))
+        .pivot(Align2::RIGHT_CENTER)
+        .fixed_pos(pos2(rail_left - 8.0, anchor.center().y))
         .show(ctx, |ui| {
             let frame = egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_max_width(300.0);
@@ -169,7 +173,7 @@ fn status_popup(
             let r = ui.interact(
                 frame.response.rect,
                 Id::new("processing_status_popup_hit"),
-                Sense::click(),
+                Sense::CLICK,
             );
             clicked = r.clicked();
             if r.hovered() {
@@ -355,11 +359,13 @@ impl ProcessingRail {
         let mut clicked = None;
         let mut focused = None;
         let mut show_details: Option<StepId> = None;
+        let mut rail_left = ui.max_rect().left();
         let mut pill_rects: Vec<Rect> = Vec::new();
         let n = ids.len();
         for (i, step) in model.run.steps.iter().enumerate() {
             let selected = model.selected.as_ref() == Some(&step.id);
             let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
+            rail_left = rail_left.min(rect.left());
             let response = ui.interact(rect, row_ids[i], Sense::click());
             let health = step.assessment.health;
             let line = Stroke::new(1.5, theme.border);
@@ -427,7 +433,8 @@ impl ProcessingRail {
             let pill_hit = ui.interact(
                 pill_rect.expand(3.0),
                 Id::new(("proc_pill", &step.id.0)),
-                Sense::click(),
+                // Not focusable: the arrow keys must stay with the step rows.
+                Sense::CLICK,
             );
             if pill_hit.hovered() {
                 self.status_popup = Some(i);
@@ -469,13 +476,19 @@ impl ProcessingRail {
             // gap between them).
             let keep = pill.is_some_and(|p| {
                 pointer_in(ui.ctx(), p)
-                    || self
-                        .popup_rect
-                        .is_some_and(|r| pointer_in(ui.ctx(), p.union(r.expand(4.0))))
+                    || self.popup_rect.is_some_and(|r| {
+                        // The pop-up, and the strip between it and the light.
+                        let corridor = Rect::from_min_max(
+                            pos2(r.right(), p.top()),
+                            pos2(p.left(), p.bottom()),
+                        );
+                        pointer_in(ui.ctx(), r.expand(4.0)) || pointer_in(ui.ctx(), corridor)
+                    })
             });
             match model.run.steps.get(i) {
                 Some(step) if keep => {
-                    let (rect, click) = status_popup(ui.ctx(), theme, step, pill_rects[i]);
+                    let (rect, click) =
+                        status_popup(ui.ctx(), theme, step, pill_rects[i], rail_left);
                     self.popup_rect = Some(rect);
                     if click {
                         show_details = Some(step.id.clone());

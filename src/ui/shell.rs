@@ -9,6 +9,8 @@ use super::theme::Theme;
 use super::view_state::{Layout, ViewOptions};
 use crate::data::{Dataset, Source};
 use crate::loader::LoadingInfo;
+use crate::session::{Action as SessionAction, Difference, Links, Session};
+use egui_phosphor::regular as icon;
 
 /// Something the user asked for in the shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,9 +58,101 @@ pub fn menu_bar(ui: &mut Ui) -> Option<Action> {
     action
 }
 
+/// What the toolbar needs to offer several controllers: compare, link, and
+/// what differs between the two being compared. What the user asked for
+/// is collected in `actions`.
+pub struct Multi<'a> {
+    /// How many controllers there are.
+    pub count: usize,
+    /// Show two side by side?
+    pub compare: &'a mut bool,
+    /// What is linked.
+    pub links: Links,
+    /// The two controllers compared (left, right), when comparing.
+    pub pair: (usize, usize),
+    /// What differs between them.
+    pub differences: Vec<Difference>,
+    /// Session actions the controls asked for.
+    pub actions: Vec<SessionAction>,
+}
+
+/// The controls for several controllers: Compare, Link, and the differences chip.
+fn multi_controls(ui: &mut Ui, theme: &Theme, multi: &mut Multi) {
+    // Right to left: the rightmost comes first.
+    let (a, b) = (
+        Session::controller_name(multi.pair.0),
+        Session::controller_name(multi.pair.1),
+    );
+    if *multi.compare && multi.count >= 2 {
+        let n = multi.differences.len();
+        let label = if n == 0 {
+            format!("{a} = {b}")
+        } else {
+            format!("{a} ≠ {b} · {n}")
+        };
+        let color = if n == 0 { theme.text_dim } else { theme.accent };
+        ui.menu_button(RichText::new(label).color(color), |ui| {
+            ui.set_min_width(260.0);
+            if multi.differences.is_empty() {
+                ui.label(format!("{a} and {b} have the same settings."));
+            }
+            for d in &multi.differences {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(&d.what).small().color(theme.text_dim));
+                    ui.label(
+                        RichText::new(format!("{a}: {}  {b}: {}", d.a, d.b))
+                            .small()
+                            .monospace(),
+                    );
+                });
+            }
+            ui.separator();
+            if ui.button(format!("Make {b} like {a}")).clicked() {
+                multi.actions.push(SessionAction::CloneController {
+                    from: multi.pair.0,
+                    to: multi.pair.1,
+                });
+                ui.close();
+            }
+            if ui.button(format!("Make {a} like {b}")).clicked() {
+                multi.actions.push(SessionAction::CloneController {
+                    from: multi.pair.1,
+                    to: multi.pair.0,
+                });
+                ui.close();
+            }
+        })
+        .response
+        .on_hover_text("What differs between the two controllers");
+    }
+    ui.menu_button(icon::LINK, |ui| {
+        let mut links = multi.links;
+        ui.checkbox(&mut links.crosshair, "Crosshair and slices")
+            .on_hover_text("Moving the crosshair in one controller moves it in the others");
+        ui.checkbox(&mut links.zoom, "Zoom and pan")
+            .on_hover_text("Zooming or panning one controller does the same in the others");
+        if links != multi.links {
+            multi.actions.push(SessionAction::SetLinks(links));
+        }
+    })
+    .response
+    .on_hover_text("Link the controllers");
+    if multi.count >= 2 {
+        ui.toggle_value(multi.compare, "Compare")
+            .on_hover_text("Show controllers A and B side by side");
+    }
+    ui.separator();
+}
+
 /// Toolbar: a breadcrumb of what is being viewed on the left; on the right
 /// the R↔L and crosshair toggles and the layout switcher.
-pub fn toolbar(ui: &mut Ui, theme: &Theme, current: Option<&Dataset>, options: &mut ViewOptions) {
+pub fn toolbar(
+    ui: &mut Ui,
+    theme: &Theme,
+    current: Option<&Dataset>,
+    options: &mut ViewOptions,
+    multi: Option<&mut Multi>,
+) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("afniru").color(theme.accent).strong());
         ui.label(RichText::new("›").color(theme.text_faint));
@@ -74,6 +168,9 @@ pub fn toolbar(ui: &mut Ui, theme: &Theme, current: Option<&Dataset>, options: &
         };
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Right-to-left: the rightmost widget comes first.
+            if let Some(multi) = multi {
+                multi_controls(ui, theme, multi);
+            }
             for layout in [Layout::Grid, Layout::Column, Layout::Row] {
                 if layout_button(ui, theme, layout, options.layout == layout).clicked() {
                     options.layout = layout;

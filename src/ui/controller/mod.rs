@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use card_frame::{CardHeader, show_card};
 use workspace::Workspaces;
 
-use crate::session::{Action, OverlayChange, graph};
+use crate::session::{Action, OverlayChange, Session, graph};
 use crate::tools::{Instance, ToolContext, ToolId};
 use crate::ui::theme::Theme;
 
@@ -114,11 +114,10 @@ impl ControllerUi {
     /// The expanded sidebar's contents.
     fn sidebar(&mut self, ui: &mut Ui, cx: &ToolContext) -> Vec<Action> {
         let theme = cx.theme;
-        self.tabs_row(ui, cx);
+        let mut actions = self.tabs_row(ui, cx);
         ui.add_space(8.0);
         self.workspace_row(ui, cx);
         ui.add_space(4.0);
-        let mut actions = Vec::new();
         let shelf_events = shelf::shelf(ui, theme, self.workspaces.current());
         if let Some(tool) = shelf_events.drag_started {
             self.tile_drag = Some(tool);
@@ -170,21 +169,100 @@ impl ControllerUi {
         );
     }
 
-    /// Controller tabs (only A until Milestone 8), pop-out and collapse.
-    fn tabs_row(&mut self, ui: &mut Ui, cx: &ToolContext) {
+    /// Controller tabs (A, B, ...), the + that clones the active controller
+    /// into a new one, pop-out and collapse. Returns what the tabs asked for.
+    fn tabs_row(&mut self, ui: &mut Ui, cx: &ToolContext) -> Vec<Action> {
         let theme = cx.theme;
+        let mut actions = Vec::new();
+        let count = cx.session.controllers.len();
+        let active = cx.session.active;
         ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(vec2(30.0, 26.0), egui::Sense::hover());
-            ui.painter().rect_filled(rect, 6.0, theme.accent);
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "A",
-                egui::FontId::proportional(14.0),
-                egui::Color32::BLACK,
-            );
-            ui.add_enabled(false, Button::new(RichText::new(icon::PLUS)))
-                .on_disabled_hover_text("More controllers (B, C, …) arrive in Milestone 8");
+            for i in 0..count {
+                let name = Session::controller_name(i).to_string();
+                let is_active = i == active;
+                let underlay = cx.session.controllers[i]
+                    .underlay
+                    .and_then(|id| cx.session.store.get(id))
+                    .map_or("no dataset".to_string(), |d| d.name.clone());
+                let (rect, response) =
+                    ui.allocate_exact_size(vec2(30.0, 26.0), egui::Sense::click());
+                response.widget_info(|| {
+                    egui::WidgetInfo::selected(
+                        egui::WidgetType::Button,
+                        true,
+                        is_active,
+                        format!("Controller {name}"),
+                    )
+                });
+                let fill = if is_active {
+                    theme.accent
+                } else if response.hovered() {
+                    theme.card_hi
+                } else {
+                    theme.card
+                };
+                ui.painter().rect_filled(rect, 6.0, fill);
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    &name,
+                    egui::FontId::proportional(14.0),
+                    if is_active {
+                        egui::Color32::BLACK
+                    } else {
+                        theme.text
+                    },
+                );
+                let response = response.on_hover_text(format!("Controller {name}: {underlay}"));
+                if response.clicked() {
+                    actions.push(Action::SelectController(i));
+                }
+                response.context_menu(|ui| {
+                    if ui
+                        .button(format!(
+                            "Clone {name} into {}",
+                            Session::controller_name(count)
+                        ))
+                        .clicked()
+                    {
+                        actions.push(Action::CloneController { from: i, to: count });
+                        ui.close();
+                    }
+                    for j in (0..count).filter(|j| *j != i) {
+                        if ui
+                            .button(format!("Copy {name} over {}", Session::controller_name(j)))
+                            .clicked()
+                        {
+                            actions.push(Action::CloneController { from: i, to: j });
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    if ui
+                        .add_enabled(count > 1, Button::new(format!("Close {name}")))
+                        .clicked()
+                    {
+                        actions.push(Action::RemoveController(i));
+                        ui.close();
+                    }
+                });
+            }
+            let can_add = count < 4;
+            if ui
+                .add_enabled(can_add, Button::new(RichText::new(icon::PLUS)))
+                .on_hover_text(format!(
+                    "Clone {} into a new controller {} to compare (same data, same settings)",
+                    Session::controller_name(active),
+                    Session::controller_name(count)
+                ))
+                .on_disabled_hover_text("Up to four controllers")
+                .clicked()
+            {
+                actions.push(Action::CloneController {
+                    from: active,
+                    to: count,
+                });
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add(Button::new(RichText::new(icon::CARET_DOUBLE_LEFT)))
@@ -200,6 +278,7 @@ impl ControllerUi {
                     );
             });
         });
+        actions
     }
 
     /// "TOOLS", the workspace menu and its gear.
