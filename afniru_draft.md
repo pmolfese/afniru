@@ -19,7 +19,7 @@ The UI direction is shown in rendered mockups in [`mockups/`](mockups/) (see
 
 | Path | What it is | Relationship |
 |---|---|---|
-| `../afni_rust/` | crate **`afni-io`** (imported as `afni_io`): pure-Rust HEAD/BRIK, NIfTI, GIfTI, NIML, 1D I/O | afniru's file I/O. Phases 1–5 of its roadmap are done (see "afni-io status") |
+| `../afni-io/` | crate **`afni-io`** (imported as `afni_io`): pure-Rust HEAD/BRIK, NIfTI, GIfTI, NIML, 1D I/O | afniru's file I/O. Phases 1–5 of its roadmap are done (see "afni-io status") |
 | `../sumaru/` | egui + wgpu SUMA rebuild (~54k lines) | Source of reusable logic: colormaps, threshold/fade, clustering, NIML talk |
 | `../afni/src/` | AFNI C source | Reference behavior. Check AFNI semantics here, not from memory |
 | `mockups/ui_mockup/` | Standalone egui crate that renders the mockup PNGs | **Reference only**, not production code. Look at it for layout, colors and widget ideas; don't copy it wholesale |
@@ -27,7 +27,7 @@ The UI direction is shown in rendered mockups in [`mockups/`](mockups/) (see
 The long-term plan is a shared workspace:
 
 ```
-afni-io     file formats, stat metadata (+ p-values, see below)   (../afni_rust)
+afni-io     file formats, stat metadata (+ p-values, see below)   (../afni-io)
 afni-core   color, overlay, threshold, cluster, coordinates       (extracted later from sumaru + afniru)
 sumaru      surface viewer
 afniru      volume viewer                                          (this repo)
@@ -296,14 +296,14 @@ one thing and sees immediately where the results differ.
 
 | Area | Choice | Why |
 |---|---|---|
-| GUI | **egui 0.34.x**, same version as sumaru | Immediate mode; widgets and code move between the two projects. Pin the exact version and upgrade it together with sumaru |
+| GUI | **egui 0.36.x**, same version as sumaru | Immediate mode; widgets and code move between the two projects. Pin the exact version and upgrade it together with sumaru |
 | App shell | **eframe** (wgpu backend) | Less boilerplate than raw winit + egui-wgpu. Has built-in multi-window viewports (for pop-outs) and file drag and drop |
 | Slice rendering | **CPU-composited RGBA → egui texture** | AFNI slices are small (≤512²). Compositing underlay + overlay layers in Rust takes about a millisecond, is easy to test, and maps 1:1 onto AFNI's per-slice logic. A GPU path can come later if profiling calls for it |
 | Icons | Start with egui's built-in glyphs; move to an icon font (e.g. `egui-phosphor`) | egui's default fonts lack some symbols (⋯ ⇄ ⊕ ⇧ ⌥) |
 | File dialogs | `rfd` (as in sumaru) | Native open/save dialogs |
 | CLI | `clap` derive (as in sumaru) | `afniru anat+orig func+orig`, plus flags later |
 | Errors | `anyhow` in the app, `afni_io::Error` from I/O | As in sumaru |
-| I/O | `afni-io = { path = "../afni_rust" }` | Path dependency while both change |
+| I/O | `afni-io = { path = "../afni-io" }` | Path dependency while both change |
 | Headless UI tests / screenshots | `egui_kittest` (wgpu, snapshot) | Already proven by `mockups/ui_mockup`. Use it for layout regression snapshots |
 
 Native menus and a dock icon are **not** goals. Menus are egui's in-window menu
@@ -317,7 +317,7 @@ to match afni-io.
 
 ## afni-io status
 
-Phases 1–5 of `../afni_rust/afni-io_ROADMAP.md` are done, and all its tests pass.
+Phases 1–5 of `../afni-io/afni-io_ROADMAP.md` are done, and all its tests pass.
 afniru can use these features directly; no stopgap parsers are needed:
 
 | afniru needs | afni-io provides |

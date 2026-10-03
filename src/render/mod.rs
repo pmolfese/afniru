@@ -1,0 +1,6 @@
+//! Turning volumes into pixels: slice extraction and compositing.
+//!
+//! CPU only and independent of egui, so everything here is unit-testable.
+
+pub mod compose;
+pub mod slice;

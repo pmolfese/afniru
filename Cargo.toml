@@ -1,0 +1,27 @@
+[package]
+name = "afniru"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "A Rust rebuild of the AFNI volume viewer."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+afni-io = { path = "../afni-io" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+# Versions track sumaru (egui 0.36.2 / wgpu 30). eframe's default features
+# already select the wgpu backend; `persistence` is for workspace storage.
+eframe = { version = "0.36.2", features = ["persistence"] }
+egui = "0.36.2"
+glam = "0.33"
+rfd = "0.17"
+
+[dev-dependencies]
+egui_kittest = { version = "0.36.2", features = ["wgpu", "snapshot"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.dev]
+opt-level = 2
