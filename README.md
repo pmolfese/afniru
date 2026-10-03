@@ -21,9 +21,12 @@ cargo run --release -- T1.nii.gz func.nii.gz  # NIfTI; first file is the underla
 You can also use File ▸ Open…, or drop a file on the window.
 
 **Folders.** Give a folder instead of (or as well as) datasets, or use File ▸ Open
-folder…, and the Datasets card lists the AFNI (`.HEAD`/`.BRIK`) and NIfTI
-(`.nii`, `.nii.gz`) datasets in it, each with **ULay** and **+ Ovl** buttons.
-Only the names are read; a dataset is loaded when you pick it (or name it on
+folder…, and the AFNI (`.HEAD`/`.BRIK`) and NIfTI (`.nii`, `.nii.gz`) datasets in it
+become choices in the dropdowns: the **ULay** dropdown in the Datasets card
+picks the underlay, the **Dataset** dropdown in a Define Overlay card picks that
+layer's dataset, and the **+** beside it (or **Add overlay**) adds another
+overlay layer. Datasets already loaded are listed first; a long list gets a
+filter box. Only the names are read; a dataset is loaded when you pick it (or name it on
 the command line), and a dataset you replace or remove is dropped from
 memory. `AFNIRU_FOLDER_BROWSER = NO` in `~/.afniru` turns the listing off. A
 folder that is an `afni_proc.py` results directory also opens in the

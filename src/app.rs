@@ -283,6 +283,15 @@ impl App {
                             let id = self.session.store.add(d);
                             self.session.apply(SessionAction::AddOverlay(id));
                         }
+                        LoadRole::Layer(layer) => {
+                            let id = self.session.store.add(d);
+                            self.session
+                                .apply(SessionAction::Layer(layer, OverlayChange::Dataset(id)));
+                            if self.session.layer(layer).is_none() {
+                                // The layer was removed while this was loading.
+                                self.session.store.release(id);
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -873,6 +882,36 @@ mod tests {
             .state(ToolId::Crosshair)
             .unwrap();
         assert!(state.collapsed);
+    }
+
+    #[test]
+    fn the_afniru_file_can_start_afniru_in_neurological_view() {
+        // `AFNI_LEFT_IS_LEFT = YES` in ~/.afniru, as parsed by the preferences.
+        let p = Prefs::parse("***ENVIRONMENT\n AFNI_LEFT_IS_LEFT = YES\n");
+        let app = App::new(p, &[], true);
+        assert!(app.view.options.left_is_left);
+        assert!(app.view.conventions(None).contains("neurological"));
+        let harness = run_frames(app, vec2(1000.0, 700.0));
+        assert!(harness.query_all_by_label("L↔R").next().is_some());
+        // Without it, the default is radiological.
+        let app = demo(ThemeChoice::Dark);
+        assert!(!app.view.options.left_is_left);
+        assert!(app.view.conventions(None).contains("radiological"));
+    }
+
+    #[test]
+    fn the_left_right_button_flips_its_label_and_the_status_bar_follows() {
+        let app = demo(ThemeChoice::Dark);
+        let mut harness = run_frames(app, vec2(1000.0, 700.0));
+        assert!(!harness.state().view.options.left_is_left);
+        harness.get_by_label("R↔L").click();
+        harness.run();
+        assert!(harness.state().view.options.left_is_left);
+        harness.get_by_label("L↔R").click(); // the button now reads L↔R
+        harness.run();
+        assert!(!harness.state().view.options.left_is_left);
+        assert!(harness.query_all_by_label("R↔L").next().is_some());
+        assert!(harness.query_all_by_label("L↔R").next().is_none());
     }
 
     #[test]
@@ -1568,19 +1607,105 @@ mod tests {
     }
 
     #[test]
-    fn the_folder_buttons_in_the_datasets_card_load_the_dataset() {
+    fn the_dropdowns_pick_the_underlay_and_overlays_from_the_folder() {
         let mut app = App::new(
             prefs(ThemeChoice::Dark, CanvasBackground::Black),
             &[],
             false,
         );
         app.add_folder(&fixtures_dir());
-        let mut harness = run_frames(app, vec2(1000.0, 900.0));
-        // One "ULay" button per listed dataset; take the first.
-        harness.get_all_by_label("ULay").next().unwrap().click();
+        let mut harness = run_frames(app, vec2(1000.0, 1000.0));
+        // Underlay: the ULay dropdown lists the folder's datasets.
+        harness.get_by_value("choose a dataset").click();
+        harness.run();
+        harness.get_by_label("tiny2+orig").click();
         harness.run();
         harness.run();
-        assert!(harness.state().session.underlay().is_some());
+        assert_eq!(
+            harness.state().session.underlay().unwrap().name,
+            "tiny2+orig"
+        );
+        // Overlay: Define Overlay has the same kind of dropdown.
+        harness.get_by_value("no overlay: choose a dataset").click();
+        harness.run();
+        harness.get_by_label("stat+orig").click();
+        harness.run();
+        harness.run();
+        let layers = harness.state().session.overlay_layers();
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].1.name, "stat+orig");
+        // The layer's own dropdown replaces its dataset (reading it from the folder).
+        harness
+            .get_all_by_value("stat+orig")
+            .next()
+            .unwrap()
+            .click();
+        harness.run();
+        harness.get_by_label("clust+orig").click();
+        harness.run();
+        harness.run();
+        let layers = harness.state().session.overlay_layers();
+        assert_eq!((layers.len(), layers[0].1.name.as_str()), (1, "clust+orig"));
+        // The replaced overlay dataset is not kept.
+        assert_eq!(harness.state().session.store.len(), 3);
+        assert_eq!(harness.state().session.store.iter().count(), 2);
+    }
+
+    #[test]
+    fn the_plus_next_to_the_overlay_dataset_adds_a_second_overlay() {
+        let mut app = App::new(
+            prefs(ThemeChoice::Dark, CanvasBackground::Black),
+            &[],
+            false,
+        );
+        app.add_folder(&fixtures_dir());
+        app.apply(vec![SessionAction::LoadDataset(
+            fixtures_dir().join("tiny2+orig"),
+            LoadRole::Underlay,
+        )]);
+        app.apply(vec![SessionAction::LoadDataset(
+            fixtures_dir().join("stat+orig"),
+            LoadRole::Overlay,
+        )]);
+        app.poll_loads();
+        let mut harness = run_frames(app, vec2(1000.0, 1100.0));
+        // The first + is the controller tab's; the second is the overlay card's.
+        harness
+            .get_all_by_label(egui_phosphor::regular::PLUS)
+            .nth(1)
+            .unwrap()
+            .click();
+        harness.run();
+        harness.get_by_label("clust+orig").click();
+        harness.run();
+        harness.run();
+        let names: Vec<String> = harness
+            .state()
+            .session
+            .overlay_layers()
+            .iter()
+            .map(|(_, d)| d.name.clone())
+            .collect();
+        assert_eq!(names, ["stat+orig", "clust+orig"]); // the new one on top
+    }
+
+    #[test]
+    fn a_dataset_picked_for_a_layer_that_was_removed_meanwhile_is_dropped() {
+        let mut app = App::new(
+            prefs(ThemeChoice::Dark, CanvasBackground::Black),
+            &[],
+            false,
+        );
+        app.apply(vec![SessionAction::LoadDataset(
+            fixtures_dir().join("tiny2+orig"),
+            LoadRole::Underlay,
+        )]);
+        app.apply(vec![SessionAction::LoadDataset(
+            fixtures_dir().join("stat+orig"),
+            LoadRole::Layer(crate::session::LayerId(7)),
+        )]);
+        app.poll_loads();
+        assert_eq!(app.session.store.iter().count(), 1);
     }
 
     #[test]
@@ -1825,9 +1950,12 @@ mod tests {
             h.get_all_by_value(v).next().unwrap().rect().min.y
         };
         assert!(y(&harness, "23") < y(&harness, "9")); // by rank: largest first
-        for name in ["vox", "vox ▼"] {
+        for name in [
+            "vox".to_string(),
+            format!("vox {}", egui_phosphor::regular::CARET_DOWN),
+        ] {
             // The heading follows the combo box showing the same unit.
-            harness.get_all_by_value(name).last().unwrap().click();
+            harness.get_all_by_value(&name).last().unwrap().click();
             harness.run();
         }
         assert!(y(&harness, "23") > y(&harness, "9")); // reversed: smallest first
@@ -1844,6 +1972,58 @@ mod tests {
         // A layer without Clusterize has nothing to save.
         let (plain, id) = clusterize_app();
         assert!(plain.cluster_report(id).is_none());
+    }
+
+    #[test]
+    fn clicking_the_same_cluster_again_alternates_between_peak_and_center_of_mass() {
+        let (mut app, id) = clusterize_app();
+        hook(&mut app, id, false);
+        fold_for_table(&mut app, id);
+        let mut harness = run_frames(app, vec2(1300.0, 1100.0));
+        let cursor = |h: &egui_kittest::Harness<'_, App>| h.state().session.controller().cursor.ijk;
+        let click_peak = |h: &mut egui_kittest::Harness<'_, App>| {
+            h.get_all_by_value("-5.2776").next().unwrap().click();
+            h.run();
+            h.run();
+        };
+        click_peak(&mut harness);
+        let at_peak = cursor(&harness);
+        assert!(
+            harness
+                .query_all_by_value(&format!("{} peak", egui_phosphor::regular::TARGET))
+                .next()
+                .is_some(),
+            "labelled as the peak"
+        );
+        // The same cluster again: its center of mass, labelled.
+        click_peak(&mut harness);
+        let at_center = cursor(&harness);
+        assert_ne!(at_peak, at_center);
+        assert!(
+            harness
+                .query_all_by_value(&format!(
+                    "{} center",
+                    egui_phosphor::regular::CROSSHAIR_SIMPLE
+                ))
+                .next()
+                .is_some(),
+            "labelled as the center"
+        );
+        assert!(
+            harness
+                .query_all_by_value(&format!("{} peak", egui_phosphor::regular::TARGET))
+                .next()
+                .is_none()
+        );
+        // And once more: back to the peak.
+        click_peak(&mut harness);
+        assert_eq!(cursor(&harness), at_peak);
+        assert!(
+            harness
+                .query_all_by_value(&format!("{} peak", egui_phosphor::regular::TARGET))
+                .next()
+                .is_some()
+        );
     }
 
     #[test]

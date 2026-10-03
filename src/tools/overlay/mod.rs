@@ -6,8 +6,9 @@
 use afni_core::afni_colors::AfniColorScale;
 use afni_core::calc::Expr;
 use egui::{ComboBox, DragValue, RichText, Slider, TextEdit, Ui};
+use egui_phosphor::regular as icon;
 
-use super::datasets::sub_brick_text;
+use super::datasets::{Picks, dataset_items, sub_brick_text};
 use super::{Instance, Tool, ToolContext, ToolId};
 use crate::render::overlay::range_top;
 use crate::session::overlay::{Binding, Coord, MaskRule, OverlayChange};
@@ -38,10 +39,15 @@ impl Tool for OverlayTool {
     fn card_ui(&self, ui: &mut Ui, cx: &ToolContext, instance: &Instance) -> Vec<Action> {
         let mut actions = Vec::new();
         let Some(o) = cx.overlay(LayerId(instance.id)) else {
-            ui.label(
-                RichText::new("No overlay. Add one with \"Add overlay\" in the Datasets card.")
-                    .color(cx.theme.text_dim),
-            );
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Dataset").color(cx.theme.text_dim));
+                ComboBox::from_id_salt("olay_ds_none")
+                    .width(ui.available_width())
+                    .selected_text("no overlay: choose a dataset")
+                    .show_ui(ui, |ui| {
+                        dataset_items(ui, cx, None, &Picks::new_overlay(), &mut actions);
+                    });
+            });
             return actions;
         };
         let layer = o.layer;
@@ -527,20 +533,33 @@ impl OverlayTool {
         actions: &mut Vec<Action>,
     ) {
         let layer = o.layer;
+        // Room for the label column and the + button, fixed so the grid settles.
+        let dataset_width = (ui.available_width() - 100.0).max(80.0);
         egui::Grid::new(("overlay_pickers", layer.id.0))
             .num_columns(2)
             .show(ui, |ui| {
                 ui.label(RichText::new("Dataset").color(cx.theme.text_dim));
-                ComboBox::from_id_salt(("olay_ds", layer.id.0))
-                    .width(ui.available_width())
-                    .selected_text(&o.dataset.name)
-                    .show_ui(ui, |ui| {
-                        for (id, d) in cx.session.store.iter() {
-                            if ui.selectable_label(layer.dataset == id, &d.name).clicked() {
-                                actions.push(Action::Layer(layer.id, OverlayChange::Dataset(id)));
-                            }
-                        }
-                    });
+                ui.horizontal(|ui| {
+                    // The dataset of this layer, from those loaded or listed in a
+                    // folder; and a + to add another overlay layer the same way.
+                    ComboBox::from_id_salt(("olay_ds", layer.id.0))
+                        .width(dataset_width)
+                        .selected_text(&o.dataset.name)
+                        .show_ui(ui, |ui| {
+                            dataset_items(
+                                ui,
+                                cx,
+                                Some(layer.dataset),
+                                &Picks::layer(layer.id),
+                                actions,
+                            );
+                        });
+                    ui.menu_button(icon::PLUS, |ui| {
+                        dataset_items(ui, cx, None, &Picks::new_overlay(), actions);
+                    })
+                    .response
+                    .on_hover_text("Add another overlay layer");
+                });
                 ui.end_row();
                 for (label, current, is_olay) in [
                     ("OLay", layer.olay_sub, true),

@@ -17,7 +17,7 @@ use crate::geom::Plane;
 use crate::geom::coords::{ijk_to_ras, magnitude_and_letter};
 use crate::render::compose::{self, Window};
 use crate::render::layers::{self, LayerInput};
-use crate::render::overlay::{OverlayFrames, outline_only};
+use crate::render::overlay::{OverlayFrames, contrast_outline, outline_only};
 use crate::render::slice::{self, PlaneMap, Slice};
 use crate::session::store::DatasetId;
 use crate::session::{Cursor, OverlayLayer};
@@ -121,12 +121,11 @@ fn overlay_planes(
         let colors = r.colors;
         if o.layer.boxed {
             // B draws the clusters filled (with A's fade, if on) and adds a
-            // solid outline around the suprathreshold regions on top.
+            // solid black or white outline around the suprathreshold regions
+            // on top (an outline in the fill's own color would be invisible).
             let mut edge = colors.clone();
             outline_only(&mut edge, &r.passed, map.width, map.height);
-            for c in edge.iter_mut().filter(|c| c.a > 0.0) {
-                *c = c.with_alpha(1.0);
-            }
+            contrast_outline(&mut edge);
             outlines.push(edge);
         }
         filled.push(colors);
@@ -613,7 +612,13 @@ mod tests {
         assert!((planes[2][0].a - 0.4).abs() < 1e-6);
         let outline = &planes[3];
         assert!(outline.iter().any(|c| c.a > 0.0) && outline.iter().any(|c| c.a == 0.0));
-        assert!(outline.iter().filter(|c| c.a > 0.0).all(|c| c.a == 1.0));
+        assert!(
+            outline
+                .iter()
+                .filter(|c| c.a > 0.0)
+                .all(|c| c.a == 1.0 && c.r == c.g && c.g == c.b && (c.r == 0.0 || c.r == 1.0)),
+            "the outline is solid black or white"
+        );
         // The cache key sees order, visibility and settings.
         let key = overlay_key(&cx.overlays);
         assert_ne!(key, 0);

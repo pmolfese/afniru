@@ -11,6 +11,7 @@ pub mod compute;
 pub mod engine;
 
 use egui::{Button, ComboBox, DragValue, Label, RichText, ScrollArea, Sense, Ui, vec2};
+use egui_phosphor::regular as icon;
 
 use super::{Instance, Tool, ToolContext, ToolId};
 use crate::geom::coords::ijk_to_ras;
@@ -275,8 +276,49 @@ fn mm(v: f64) -> String {
     }
 }
 
+/// Where a click on a cluster takes the crosshair. The first click goes to the
+/// peak, a second click on the same cluster to its center of mass, and further
+/// clicks alternate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JumpTo {
+    /// The voxel of largest absolute value.
+    Peak,
+    /// The center of mass (weighted by absolute value).
+    Center,
+}
+
+impl JumpTo {
+    fn other(self) -> Self {
+        match self {
+            JumpTo::Peak => JumpTo::Center,
+            JumpTo::Center => JumpTo::Peak,
+        }
+    }
+
+    /// The tag shown on the row the crosshair was sent to.
+    fn tag(self) -> String {
+        match self {
+            JumpTo::Peak => format!("{} peak", icon::TARGET),
+            JumpTo::Center => format!("{} center", icon::CROSSHAIR_SIMPLE),
+        }
+    }
+
+    fn ras(self, row: &compute::ClusterRow) -> [f64; 3] {
+        match self {
+            JumpTo::Peak => row.peak_ras,
+            JumpTo::Center => row.center_ras,
+        }
+    }
+}
+
+/// The last jump from the table: which cluster, to what, and the voxel the
+/// crosshair landed on (the tag is shown only while it is still there).
+type Landed = (u32, JumpTo, [usize; 3]);
+
 /// The cluster table: rank, voxels, peak and where it is. A click jumps to
-/// the peak (the center, for a mask, which has no peak).
+/// the peak; clicking the same cluster again goes to its center of mass, and
+/// so on; the row shows which one the crosshair is at. (A mask has no peak:
+/// its clusters are always visited at their center.)
 fn table(
     ui: &mut Ui,
     cx: &ToolContext,
@@ -286,17 +328,28 @@ fn table(
 ) -> Vec<Action> {
     let theme = cx.theme;
     let mut actions = Vec::new();
+    // Where the last click took the crosshair, if it is still there.
+    let landed_id = ui.id().with("cluster_landed");
+    let cursor = cx.controller.cursor.ijk;
+    let landed: Option<Landed> = ui
+        .data(|d| d.get_temp::<Landed>(landed_id))
+        .filter(|(_, _, ijk)| *ijk == cursor);
     // Sorting: click a heading to order by it, again to reverse.
     let sort_id = ui.id().with("cluster_sort");
     let (by, descending): (SortBy, bool) = ui.data(|d| d.get_temp(sort_id)).unwrap_or_default();
     let mut next_sort = (by, descending);
+    // Sort arrows are Phosphor glyphs (the text font has none).
+    let (caret_up, caret_down) = (
+        format!(" {}", icon::CARET_UP),
+        format!(" {}", icon::CARET_DOWN),
+    );
     let mut head = |ui: &mut Ui, text: &str, column: Option<SortBy>| {
         let arrow = match column {
             Some(c) if c == by => {
                 if descending {
-                    " ▲"
+                    caret_up.as_str()
                 } else {
-                    " ▼"
+                    caret_down.as_str()
                 }
             }
             _ => "",
@@ -332,7 +385,7 @@ fn table(
         .auto_shrink([false, true])
         .show(ui, |ui| {
             egui::Grid::new("cluster_table")
-                .num_columns(4)
+                .num_columns(5)
                 .spacing(vec2(10.0, 2.0))
                 .min_col_width(24.0)
                 .show(ui, |ui| {
@@ -345,16 +398,24 @@ fn table(
                         head(ui, "peak", Some(SortBy::Peak));
                         head(ui, "x y z", None);
                     }
+                    head(ui, "at", None);
                     ui.end_row();
                     for row in compute::sorted(&out.rows, by, descending)
                         .into_iter()
                         .take(MAX_ROWS)
                     {
-                        let at = if is_mask {
-                            row.center_ras
+                        // What a click on this row does now: the peak, or (the
+                        // crosshair being at this cluster's peak) its center.
+                        let mode_here = landed.filter(|(r, _, _)| *r == row.rank).map(|l| l.1);
+                        let next = if is_mask {
+                            JumpTo::Center
                         } else {
-                            row.peak_ras
+                            mode_here.map_or(JumpTo::Peak, JumpTo::other)
                         };
+                        // The row shows where the crosshair is, or where a click
+                        // would go.
+                        let shown = mode_here.unwrap_or(next);
+                        let at = shown.ras(row);
                         let [x, y, z] = cx.coord_orient.ras_to_coords(at);
                         let ink = if here == Some(row.rank) {
                             theme.accent
@@ -370,6 +431,7 @@ fn table(
                                 format_value(row.peak as f32)
                             },
                             format!("{} {} {}", mm(x), mm(y), mm(z)),
+                            mode_here.map_or_else(String::new, JumpTo::tag),
                         ];
                         let mut clicked = false;
                         for cell in cells {
@@ -379,15 +441,34 @@ fn table(
                                         .sense(Sense::click()),
                                 )
                                 .on_hover_text(format!(
-                                    "{} µL · click to go to the {}",
+                                    "{} µL · click: go to the {}{}",
                                     mm(row.volume_ul),
-                                    if is_mask { "center" } else { "peak" }
+                                    if next == JumpTo::Peak {
+                                        "peak"
+                                    } else {
+                                        "center of mass"
+                                    },
+                                    if is_mask {
+                                        ""
+                                    } else {
+                                        " · click again: the other"
+                                    }
                                 ))
                                 .clicked();
                         }
                         ui.end_row();
                         if clicked {
-                            actions.push(Action::JumpToRas(at));
+                            let target = next.ras(row);
+                            actions.push(Action::JumpToRas(target));
+                            // Remember the voxel it lands on, to label the row.
+                            if let Some(d) = cx.dataset
+                                && let Some(ijk) =
+                                    crate::geom::coords::ras_to_ijk(&d.ijk_to_ras, d.dims, target)
+                            {
+                                ui.data_mut(|m| {
+                                    m.insert_temp::<Landed>(landed_id, (row.rank, next, ijk))
+                                });
+                            }
                         }
                     }
                 });

@@ -153,6 +153,20 @@ pub(crate) fn outline_only(colors: &mut [Rgba], passed: &[bool], width: usize, h
     }
 }
 
+/// Turn the outline pixels (the opaque ones left by [`outline_only`]) into a
+/// solid black or white line, whichever stands out from the layer's own color
+/// there, so a box is visible around the filled region it encloses.
+pub(crate) fn contrast_outline(outline: &mut [Rgba]) {
+    for c in outline.iter_mut().filter(|c| c.a > 0.0) {
+        let luma = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+        *c = if luma > 0.55 {
+            Rgba::BLACK
+        } else {
+            Rgba::WHITE
+        };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use afni_core::afni_colors::AfniColorScale;
@@ -316,5 +330,18 @@ mod tests {
     fn max_abs_skips_non_finite_values() {
         assert_eq!(max_abs(&[1.0, -4.0, f32::NAN, f32::INFINITY, 3.0]), 4.0);
         assert_eq!(max_abs(&[]), 0.0);
+    }
+
+    #[test]
+    fn the_outline_is_black_on_light_fills_and_white_on_dark_ones() {
+        let mut line = vec![
+            Rgba::new(1.0, 1.0, 0.2, 0.5).unwrap(), // light yellow
+            Rgba::new(0.1, 0.1, 0.8, 0.5).unwrap(), // dark blue
+            Rgba::TRANSPARENT,
+        ];
+        contrast_outline(&mut line);
+        assert_eq!(line[0], Rgba::BLACK);
+        assert_eq!(line[1], Rgba::WHITE);
+        assert_eq!(line[2], Rgba::TRANSPARENT);
     }
 }

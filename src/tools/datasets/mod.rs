@@ -7,7 +7,9 @@ use egui_phosphor::regular as icon;
 use super::{Instance, Tool, ToolContext};
 use crate::data::Source;
 use crate::session::action::LoadRole;
-use crate::session::{Action, LayerId, OverlayChange};
+use std::path::Path;
+
+use crate::session::{Action, DatasetId, LayerId, OverlayChange};
 
 /// The Datasets tool. Pinned: it is always in the card stack.
 pub struct DatasetsTool;
@@ -27,8 +29,18 @@ impl Tool for DatasetsTool {
                     RichText::new("No dataset: File ▸ Open…, or drop one on the window.")
                         .color(theme.text_dim),
                 );
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("ULay").color(theme.text_dim));
+                    ComboBox::from_id_salt("ulay")
+                        .width(ui.available_width())
+                        .selected_text("choose a dataset")
+                        .show_ui(ui, |ui| {
+                            dataset_items(ui, cx, None, &Picks::underlay(), &mut actions);
+                        });
+                });
             }
-            actions.extend(folder_section(ui, cx));
+            actions.extend(folder_rows(ui, cx));
             return actions;
         };
 
@@ -41,11 +53,7 @@ impl Tool for DatasetsTool {
                     .width(ui.available_width())
                     .selected_text(&ds.name)
                     .show_ui(ui, |ui| {
-                        for (id, d) in cx.session.store.iter() {
-                            if ui.selectable_label(current == Some(id), &d.name).clicked() {
-                                actions.push(Action::SetUnderlay(id));
-                            }
-                        }
+                        dataset_items(ui, cx, current, &Picks::underlay(), &mut actions);
                     });
                 ui.end_row();
 
@@ -71,7 +79,7 @@ impl Tool for DatasetsTool {
         ui.label(RichText::new(ds.summary()).color(theme.text_dim).small());
         ui.separator();
         actions.extend(layer_list(ui, cx));
-        actions.extend(folder_section(ui, cx));
+        actions.extend(folder_rows(ui, cx));
         actions
     }
 
@@ -93,8 +101,9 @@ fn loading_rows(ui: &mut Ui, cx: &ToolContext) -> Vec<Action> {
     for l in cx.loading {
         ui.horizontal(|ui| {
             let what = match l.role {
-                LoadRole::Underlay => "ULay",
-                LoadRole::Overlay => "Overlay",
+                LoadRole::Underlay => "ULay".to_string(),
+                LoadRole::Overlay => "Overlay".to_string(),
+                LoadRole::Layer(l) => format!("Overlay {}", l.0),
             };
             let text = if l.waiting {
                 format!("{what} {} · read, waiting for the one before", l.name)
@@ -122,24 +131,175 @@ fn loading_rows(ui: &mut Ui, cx: &ToolContext) -> Vec<Action> {
     actions
 }
 
-/// The datasets found in each folder, each with buttons to open it as the
-/// underlay or as a new overlay layer.
-fn folder_section(ui: &mut Ui, cx: &ToolContext) -> Vec<Action> {
+/// What choosing a dataset in a picker does: for one already loaded, and for
+/// one only listed in a folder (which is read from disk then).
+pub(crate) struct Picks {
+    loaded: Box<dyn Fn(DatasetId) -> Action>,
+    from_folder: Box<dyn Fn(&Path) -> Action>,
+}
+
+impl Picks {
+    /// Make the dataset the underlay.
+    pub(crate) fn underlay() -> Self {
+        Self {
+            loaded: Box::new(Action::SetUnderlay),
+            from_folder: Box::new(|p| Action::LoadDataset(p.to_path_buf(), LoadRole::Underlay)),
+        }
+    }
+
+    /// Add the dataset as a new overlay layer.
+    pub(crate) fn new_overlay() -> Self {
+        Self {
+            loaded: Box::new(Action::AddOverlay),
+            from_folder: Box::new(|p| Action::LoadDataset(p.to_path_buf(), LoadRole::Overlay)),
+        }
+    }
+
+    /// Make the dataset the one drawn by an existing layer.
+    pub(crate) fn layer(layer: LayerId) -> Self {
+        Self {
+            loaded: Box::new(move |id| Action::Layer(layer, OverlayChange::Dataset(id))),
+            from_folder: Box::new(move |p| {
+                Action::LoadDataset(p.to_path_buf(), LoadRole::Layer(layer))
+            }),
+        }
+    }
+}
+
+/// Is a dataset from this path already in memory?
+fn is_loaded(cx: &ToolContext, path: &Path) -> bool {
+    let wanted = path.to_string_lossy();
+    cx.session.store.iter().any(
+        |(_, d)| matches!(&d.source, Source::File(p) if p.to_string_lossy().starts_with(&*wanted)),
+    )
+}
+
+/// The items of a dataset picker (inside a combo box or menu): the datasets
+/// already loaded, then, per folder, the ones not loaded yet (they are read
+/// when chosen). A filter box appears when the list is long.
+pub(crate) fn dataset_items(
+    ui: &mut Ui,
+    cx: &ToolContext,
+    current: Option<DatasetId>,
+    picks: &Picks,
+    actions: &mut Vec<Action>,
+) {
+    let theme = cx.theme;
+    let unloaded: usize = cx
+        .folders
+        .iter()
+        .filter_map(|f| f.entries.as_ref())
+        .map(Vec::len)
+        .sum();
+    let filter_id = ui.id().with("dataset_filter");
+    let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
+    if unloaded + cx.session.store.iter().count() > 12 {
+        ui.add(
+            egui::TextEdit::singleline(&mut filter)
+                .hint_text("filter")
+                .desired_width(240.0),
+        );
+        ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
+    } else {
+        filter.clear();
+    }
+    let needle = filter.to_lowercase();
+    let shown = |name: &str| needle.is_empty() || name.to_lowercase().contains(&needle);
+
+    egui::ScrollArea::vertical()
+        .max_height(320.0)
+        .auto_shrink([true, true])
+        .show(ui, |ui| {
+            let mut any = false;
+            for (id, d) in cx.session.store.iter() {
+                if shown(&d.name) {
+                    any = true;
+                    if ui
+                        .selectable_label(current == Some(id), &d.name)
+                        .on_hover_text("Already loaded")
+                        .clicked()
+                    {
+                        actions.push((picks.loaded)(id));
+                        ui.close();
+                    }
+                }
+            }
+            for folder in cx.folders {
+                let Some(entries) = &folder.entries else {
+                    continue;
+                };
+                let fresh: Vec<_> = entries
+                    .iter()
+                    .filter(|e| shown(&e.label) && !is_loaded(cx, &e.path))
+                    .collect();
+                if fresh.is_empty() {
+                    continue;
+                }
+                any = true;
+                let name = folder.dir.file_name().map_or_else(
+                    || folder.dir.display().to_string(),
+                    |n| n.to_string_lossy().into(),
+                );
+                ui.separator();
+                ui.label(
+                    RichText::new(format!("{} {name}", icon::FOLDER_OPEN))
+                        .small()
+                        .color(theme.text_faint),
+                );
+                for e in fresh {
+                    if ui
+                        .selectable_label(false, &e.label)
+                        .on_hover_text(format!("Load {}", e.path.display()))
+                        .clicked()
+                    {
+                        actions.push((picks.from_folder)(&e.path));
+                        ui.close();
+                    }
+                }
+            }
+            if !any {
+                ui.label(
+                    RichText::new("nothing to choose")
+                        .small()
+                        .color(theme.text_faint),
+                );
+            }
+        });
+}
+
+/// One row for each folder being listed: its name, how many datasets it has,
+/// and buttons to read it again and to stop listing it. (Datasets are chosen
+/// from the pickers.)
+fn folder_rows(ui: &mut Ui, cx: &ToolContext) -> Vec<Action> {
     let mut actions = Vec::new();
     let theme = cx.theme;
     for folder in cx.folders {
-        ui.separator();
         ui.horizontal(|ui| {
             let name = folder.dir.file_name().map_or_else(
                 || folder.dir.display().to_string(),
                 |n| n.to_string_lossy().into(),
             );
+            let count = match (&folder.entries, &folder.error) {
+                (_, Some(e)) => e.clone(),
+                (None, _) => "reading…".to_string(),
+                (Some(e), _) if e.is_empty() => "no AFNI or NIfTI datasets".to_string(),
+                (Some(e), _) => format!("{} datasets", e.len()),
+            };
             ui.label(
                 RichText::new(format!("{} {name}", icon::FOLDER_OPEN))
-                    .strong()
-                    .color(theme.text),
+                    .small()
+                    .color(theme.text_dim),
             )
             .on_hover_text(folder.dir.display().to_string());
+            ui.label(
+                RichText::new(count)
+                    .small()
+                    .color(if folder.error.is_some() {
+                        theme.error
+                    } else {
+                        theme.text_faint
+                    }),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add(Button::new(RichText::new(icon::X)).frame(false))
@@ -157,83 +317,6 @@ fn folder_section(ui: &mut Ui, cx: &ToolContext) -> Vec<Action> {
                 }
             });
         });
-        let Some(entries) = &folder.entries else {
-            ui.label(
-                RichText::new("reading the folder…")
-                    .small()
-                    .color(theme.text_dim),
-            );
-            continue;
-        };
-        if let Some(e) = &folder.error {
-            ui.label(RichText::new(e).small().color(theme.error));
-            continue;
-        }
-        if entries.is_empty() {
-            ui.label(
-                RichText::new("no AFNI or NIfTI datasets here")
-                    .small()
-                    .color(theme.text_faint),
-            );
-            continue;
-        }
-        // A filter box for long lists.
-        let filter_id = ui.id().with(("folder_filter", &folder.dir));
-        let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
-        if entries.len() > 8 {
-            ui.add(
-                egui::TextEdit::singleline(&mut filter)
-                    .hint_text("filter")
-                    .desired_width(f32::INFINITY),
-            );
-            ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
-        }
-        let needle = filter.to_lowercase();
-        egui::ScrollArea::vertical()
-            .id_salt(("folder_scroll", &folder.dir))
-            .max_height(170.0)
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                for entry in entries
-                    .iter()
-                    .filter(|e| needle.is_empty() || e.label.to_lowercase().contains(&needle))
-                {
-                    let loaded = cx.session.store.iter().any(|(_, d)| {
-                        matches!(&d.source, Source::File(p)
-                            if p.to_string_lossy().starts_with(&*entry.path.to_string_lossy()))
-                    });
-                    ui.horizontal(|ui| {
-                        let ink = if loaded { theme.text_faint } else { theme.text };
-                        ui.add(
-                            Label::new(RichText::new(&entry.label).monospace().small().color(ink))
-                                .truncate(),
-                        )
-                        .on_hover_text(entry.path.display().to_string());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .small_button("+ Ovl")
-                                .on_hover_text("Add as a new overlay layer")
-                                .clicked()
-                            {
-                                actions.push(Action::LoadDataset(
-                                    entry.path.clone(),
-                                    LoadRole::Overlay,
-                                ));
-                            }
-                            if ui
-                                .small_button("ULay")
-                                .on_hover_text("Show as the underlay")
-                                .clicked()
-                            {
-                                actions.push(Action::LoadDataset(
-                                    entry.path.clone(),
-                                    LoadRole::Underlay,
-                                ));
-                            }
-                        });
-                    });
-                }
-            });
     }
     actions
 }
@@ -247,12 +330,7 @@ fn layer_list(ui: &mut Ui, cx: &ToolContext) -> Vec<Action> {
         ui.label(RichText::new("Overlays").strong().color(theme.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.menu_button(format!("{} Add overlay", icon::PLUS), |ui| {
-                for (id, d) in cx.session.store.iter() {
-                    if ui.button(&d.name).clicked() {
-                        actions.push(Action::AddOverlay(id));
-                        ui.close();
-                    }
-                }
+                dataset_items(ui, cx, None, &Picks::new_overlay(), &mut actions);
             });
         });
     });

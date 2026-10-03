@@ -14,6 +14,8 @@ pub enum LoadRole {
     Underlay,
     /// A new overlay layer on top.
     Overlay,
+    /// The dataset of an existing overlay layer (replacing its dataset).
+    Layer(LayerId),
 }
 
 /// A request to change the session.

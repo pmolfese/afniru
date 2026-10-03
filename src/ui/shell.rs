@@ -82,8 +82,22 @@ pub fn toolbar(ui: &mut Ui, theme: &Theme, current: Option<&Dataset>, options: &
             ui.separator();
             ui.toggle_value(&mut options.crosshair, "Xhairs")
                 .on_hover_text("Show the crosshair lines");
-            ui.toggle_value(&mut options.left_is_left, "R↔L")
-                .on_hover_text("Swap left and right: radiological ↔ neurological");
+            // The label reads the screen from left to right: R↔L is radiological
+            // (the subject's right on the screen's left), L↔R is neurological
+            // (left on left), and the lit button marks the swapped one.
+            let (label, mode) = if options.left_is_left {
+                (
+                    "L↔R",
+                    "neurological: the subject's left is on the screen's left",
+                )
+            } else {
+                (
+                    "R↔L",
+                    "radiological: the subject's right is on the screen's left",
+                )
+            };
+            ui.toggle_value(&mut options.left_is_left, label)
+                .on_hover_text(format!("{mode}\nClick to swap left and right"));
         });
     });
 }
