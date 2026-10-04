@@ -14,8 +14,8 @@ pub struct GraphPicture<'a> {
     pub values: &'a [f64],
     /// The fit, same length.
     pub fit: Option<&'a [f64]>,
-    /// Stimulus blocks as `[start, end)` time points.
-    pub stim: &'a [(usize, usize)],
+    /// Stimulus blocks as `[start, end)` time points and their color.
+    pub stim: &'a [(usize, usize, [u8; 3])],
     /// The current time point, marked with a vertical line.
     pub marker: Option<usize>,
 }
@@ -138,16 +138,15 @@ pub fn render(
     let to_y = |v: f64| top + (hi - v) / (hi - lo) * ph;
 
     // Stimulus blocks.
-    let gold = if light { [235, 170, 0] } else { [250, 204, 21] };
-    let alpha = if light { 0.22 } else { 0.14 };
-    for &(a, b) in g.stim {
+    let alpha = if light { 0.22 } else { 0.16 };
+    for &(a, b, color) in g.stim {
         let (xa, xb) = (
             to_x(a as f64 - 0.5).max(left),
             to_x(b as f64 - 0.5).min(left + pw),
         );
         for x in xa.floor() as i64..xb.ceil() as i64 {
             for y in top as i64..(top + ph) as i64 {
-                img.blend(x, y, gold, alpha);
+                img.blend(x, y, color, alpha);
             }
         }
     }
@@ -338,7 +337,7 @@ mod tests {
                 first: 0,
                 values: &values,
                 fit: Some(&fit),
-                stim: &[(10, 20), (40, 50)],
+                stim: &[(10, 20, [250, 204, 21]), (40, 50, [250, 204, 21])],
                 marker: Some(30),
             },
             [0, 0, 0],

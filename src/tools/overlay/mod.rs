@@ -239,20 +239,9 @@ impl Tool for OverlayTool {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("p =").color(theme.text_dim).monospace());
                 match p {
-                    Some(mut pv) => {
-                        let speed = (pv * 0.02).max(1e-12);
-                        if ui
-                            .add(
-                                DragValue::new(&mut pv)
-                                    .speed(speed)
-                                    .range(1e-300..=1.0)
-                                    .custom_formatter(|v, _| format_p(v))
-                                    .custom_parser(|s| s.trim().parse::<f64>().ok()),
-                            )
-                            .on_hover_text("Type a p-value to set the threshold")
-                            .changed()
-                        {
-                            actions.push(change(OverlayChange::ThresholdByP(pv)));
+                    Some(pv) => {
+                        if let Some(v) = p_box(ui, pv) {
+                            actions.push(change(OverlayChange::ThresholdByP(v)));
                         }
                     }
                     None => {
@@ -633,8 +622,59 @@ fn threshold_caption(layer: &OverlayLayer, statsym: Option<String>) -> String {
     }
 }
 
+/// Parse what the user typed in the p box; accepts `.05`, `0.05`, `5e-3`.
+fn parse_p(text: &str) -> Option<f64> {
+    let v = text.trim().parse::<f64>().ok()?;
+    (v.is_finite() && v > 0.0 && v <= 1.0).then_some(v)
+}
+
+/// A p-value text box: shows the formatted value, edits as plain text, and
+/// commits on Enter or when focus leaves.
+fn p_box(ui: &mut egui::Ui, pv: f64) -> Option<f64> {
+    let id = ui.id().with("p_box");
+    let editing: Option<String> = ui.data(|d| d.get_temp(id));
+    let mut text = editing.clone().unwrap_or_else(|| format_p(pv));
+    let out = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .desired_width(64.0)
+            .font(egui::TextStyle::Monospace),
+    );
+    out.clone()
+        .on_hover_text("Type a p-value (e.g. .05) and press Enter");
+    if out.gained_focus()
+        && let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), out.id)
+    {
+        st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(0),
+            egui::text::CCursor::new(text.chars().count()),
+        )));
+        st.store(ui.ctx(), out.id);
+    }
+    if out.has_focus() {
+        ui.data_mut(|d| d.insert_temp(id, text.clone()));
+        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            ui.data_mut(|d| d.remove_temp::<String>(id));
+            return parse_p(&text);
+        }
+        None
+    } else {
+        let had = editing.is_some();
+        ui.data_mut(|d| d.remove_temp::<String>(id));
+        if had { parse_p(&text) } else { None }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_p_value_can_be_typed_without_a_leading_zero() {
+        assert_eq!(super::parse_p(".05"), Some(0.05));
+        assert_eq!(super::parse_p(" 5e-3 "), Some(0.005));
+        assert_eq!(super::parse_p("0"), None);
+        assert_eq!(super::parse_p("2"), None);
+        assert_eq!(super::parse_p("abc"), None);
+    }
+
     use afni_core::afni_colors::AfniColorScale;
 
     use super::*;

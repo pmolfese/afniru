@@ -60,7 +60,6 @@ struct Ink {
     data: Color32,
     fit: Color32,
     marker: Color32,
-    stimulus: Color32,
 }
 
 fn ink(theme: &Theme) -> Ink {
@@ -69,14 +68,12 @@ fn ink(theme: &Theme) -> Ink {
             data: Color32::from_rgb(235, 235, 240),
             fit: Color32::from_rgb(242, 140, 72),
             marker: Color32::from_rgb(250, 204, 21),
-            stimulus: Color32::from_rgba_unmultiplied(250, 204, 21, 36),
         }
     } else {
         Ink {
             data: Color32::from_rgb(25, 28, 36),
             fit: Color32::from_rgb(214, 88, 8),
             marker: Color32::from_rgb(180, 120, 0),
-            stimulus: Color32::from_rgba_unmultiplied(235, 170, 0, 56),
         }
     }
 }
@@ -281,16 +278,21 @@ fn stimulus(plot_ui: &mut egui_plot::PlotUi, input: &GraphInput, lo: f64, hi: f6
     let Some(stim) = &input.settings.stim else {
         return;
     };
-    for (a, b) in series::stim_blocks(&stim.on) {
-        let (x0, x1) = (a as f64 - 0.5, b as f64 - 0.5);
-        plot_ui.polygon(
-            Polygon::new(
-                "stimulus",
-                PlotPoints::new(vec![[x0, lo], [x1, lo], [x1, hi], [x0, hi]]),
-            )
-            .fill_color(ink(input.theme).stimulus)
-            .stroke(Stroke::NONE),
-        );
+    let alpha = if input.theme.dark { 40 } else { 60 };
+    for (i, cond) in stim.conditions.iter().enumerate() {
+        let [r, g, b] = crate::session::series::condition_color(i);
+        let fill = Color32::from_rgba_unmultiplied(r, g, b, alpha);
+        for (a, b) in series::stim_blocks(&cond.on) {
+            let (x0, x1) = (a as f64 - 0.5, b as f64 - 0.5);
+            plot_ui.polygon(
+                Polygon::new(
+                    cond.label.clone(),
+                    PlotPoints::new(vec![[x0, lo], [x1, lo], [x1, hi], [x0, hi]]),
+                )
+                .fill_color(fill)
+                .stroke(Stroke::NONE),
+            );
+        }
     }
 }
 

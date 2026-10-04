@@ -77,6 +77,8 @@ pub enum Action {
     /// Save images of the views (a slice, the three views, a montage). The
     /// session does nothing with it: the app renders and writes the files.
     Export(ExportWhat),
+    /// Like [`Action::Export`], with the Graph added under the views.
+    ExportWithGraph(ExportWhat),
     /// Open the export dialog, with this plane preselected.
     ExportDialog(Plane),
     /// Change the Graph view's settings.

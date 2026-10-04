@@ -289,6 +289,16 @@ impl PlaneCard {
                     ui.close();
                 }
             }
+            ui.separator();
+            ui.label(RichText::new("with the Graph below").small().weak());
+            for layout in ViewsLayout::ALL {
+                if ui.button(format!("{} + Graph", layout.label())).clicked() {
+                    events
+                        .actions
+                        .push(SessionAction::ExportWithGraph(ExportWhat::Views(layout)));
+                    ui.close();
+                }
+            }
         });
         if ui.button("Montage and more options…").clicked() {
             events.actions.push(SessionAction::ExportDialog(self.plane));

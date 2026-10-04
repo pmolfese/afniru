@@ -129,6 +129,14 @@ impl Tool for GraphTool {
             ui.horizontal(|ui| match &s.stim {
                 Some(stim) => {
                     ui.label(RichText::new(&stim.name).small().monospace());
+                    for (i, c) in stim.conditions.iter().enumerate() {
+                        let [r, g, b] = crate::session::series::condition_color(i);
+                        ui.label(
+                            RichText::new(format!("■ {}", c.label))
+                                .small()
+                                .color(egui::Color32::from_rgb(r, g, b)),
+                        );
+                    }
                     if ui.small_button("Clear").clicked() {
                         actions.push(change(SeriesChange::Stim(None)));
                     }

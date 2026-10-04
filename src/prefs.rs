@@ -97,8 +97,10 @@ pub const DEFAULT_FILE: &str = "\
 // ignored, so this file keeps working across versions. Delete a line (or
 // comment it out with //) to get its default.
 //
-// This file was created with the defaults on first run. Edit it freely;
-// afniru does not overwrite it.
+// This file was created with the defaults on first run. Edit it freely.
+// When a newer afniru adds settings, it appends them here (with their
+// defaults) and never changes what you wrote. A setting you comment out with
+// // stays off; one you delete is added back with its default.
 
 ***ENVIRONMENT
 
@@ -180,7 +182,22 @@ impl Prefs {
     /// Like [`load_or_create`](Self::load_or_create) for an explicit path.
     pub fn load_or_create_at(path: &Path) -> std::io::Result<Self> {
         match fs::read_to_string(path) {
-            Ok(text) => Ok(Self::parse(&text)),
+            Ok(text) => {
+                // Settings this version added are written into the user's
+                // file (with their defaults) so they can be found and edited.
+                let added = missing_settings(&text);
+                if !added.is_empty() {
+                    let mut upgraded = text.clone();
+                    if !upgraded.ends_with('\n') {
+                        upgraded.push('\n');
+                    }
+                    upgraded.push_str(&added);
+                    if let Err(e) = write_atomically(path, &upgraded) {
+                        eprintln!("afniru: could not update {}: {e}", path.display());
+                    }
+                }
+                Ok(Self::parse(&text))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // `create_new` never overwrites, even if another afniru
                 // created the file in the meantime.
@@ -288,6 +305,67 @@ impl Prefs {
     }
 }
 
+/// The `(key, text)` blocks of [`DEFAULT_FILE`]: a setting's line and the
+/// indented `//` lines that explain it.
+fn default_settings() -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&str, String)> = Vec::new();
+    for line in DEFAULT_FILE.lines() {
+        let key = line
+            .starts_with(' ')
+            .then(|| line.split_once('=').map(|(k, _)| k.trim()))
+            .flatten()
+            .filter(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+        if let Some(key) = key {
+            out.push((key, format!("{line}\n")));
+        } else if line.starts_with(' ')
+            && line.trim_start().starts_with("//")
+            && let Some((_, text)) = out.last_mut()
+        {
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    out
+}
+
+/// Whether `text` mentions setting `key`, as a setting or commented out.
+fn mentions(text: &str, key: &str) -> bool {
+    text.lines().any(|l| {
+        let l = l.trim_start_matches(|c: char| c == '/' || c == '#' || c.is_whitespace());
+        l.strip_prefix(key)
+            .is_some_and(|rest| rest.trim_start().starts_with('='))
+    })
+}
+
+/// The documented defaults of every setting `existing` does not mention, as
+/// text to append (empty when nothing is missing). A setting the user
+/// commented out counts as mentioned, so it stays off.
+pub fn missing_settings(existing: &str) -> String {
+    let missing: Vec<String> = default_settings()
+        .into_iter()
+        .filter(|(key, _)| !mentions(existing, key))
+        .map(|(_, text)| text)
+        .collect();
+    if missing.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n// ---- Added by afniru {} (new settings, with their defaults) ----\n\n***ENVIRONMENT\n\n{}",
+        env!("CARGO_PKG_VERSION"),
+        missing.join("\n")
+    )
+}
+
+/// Write `text` to `path` through a temporary file, so a crash cannot leave
+/// a half-written preferences file.
+fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    fs::write(&tmp, text)?;
+    fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp);
+    })
+}
+
 /// Drop a trailing `//` or `#` comment.
 fn strip_comment(line: &str) -> &str {
     let cut = [line.find("//"), line.find('#')]
@@ -386,6 +464,34 @@ mod tests {
         let p = Prefs::load_or_create_at(&path).unwrap();
         assert_eq!(p.theme, ThemeChoice::Light);
         assert!(fs::read_to_string(&path).unwrap().contains("Light"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_complete_file_has_nothing_missing() {
+        assert_eq!(missing_settings(DEFAULT_FILE), "");
+    }
+
+    #[test]
+    fn missing_settings_are_appended_and_user_values_kept() {
+        let dir = std::env::temp_dir().join(format!("afniru-upgrade-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".afniru");
+        // An old file: one value changed, one setting commented out, the rest absent.
+        let old = "***ENVIRONMENT\n AFNIRU_THEME = Light\n // AFNI_LEFT_IS_LEFT = YES\n";
+        fs::write(&path, old).unwrap();
+        let p = Prefs::load_or_create_at(&path).unwrap();
+        assert_eq!(p.theme, ThemeChoice::Light);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with(old), "the user's text is untouched");
+        assert!(text.contains("AFNIRU_FOLDER_BROWSER"));
+        assert!(text.contains("AFNIRU_SLICE_NUMBER_SIZE"));
+        assert_eq!(text.matches("AFNIRU_THEME").count(), 1);
+        assert_eq!(text.matches("AFNI_LEFT_IS_LEFT").count(), 1);
+        // The upgraded file is complete, parses the same, and is not changed again.
+        assert_eq!(Prefs::parse(&text).theme, ThemeChoice::Light);
+        Prefs::load_or_create_at(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
         fs::remove_dir_all(&dir).unwrap();
     }
 

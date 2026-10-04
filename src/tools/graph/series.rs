@@ -145,19 +145,67 @@ pub fn stim_from_column(column: &[f64]) -> Vec<bool> {
     column.iter().map(|v| top > 0.0 && *v > 0.5 * top).collect()
 }
 
-/// Read a `.1D` file's first column as a stimulus.
+/// The labels in a `ColumnLabels = "a ; b"` comment, if there is one.
+fn column_labels(comments: &[String]) -> Vec<String> {
+    comments
+        .iter()
+        .find_map(|c| {
+            let (key, value) = c.split_once('=')?;
+            (key.trim() == "ColumnLabels").then(|| {
+                value
+                    .trim()
+                    .trim_matches('"')
+                    .split(';')
+                    .map(|l| l.trim().to_string())
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Read a `.1D` file as stimulus conditions, one per column. An AFNI design
+/// matrix (`3dDeconvolve -x1D`) has baseline columns too; a column is skipped
+/// when it is constant (a constant is no stimulus), and named by its
+/// `ColumnLabels` entry when there is one.
 pub fn load_stim(path: &std::path::Path) -> Result<crate::session::series::Stim, String> {
+    use crate::session::series::{Condition, Stim};
     let oned = afni_io::onedee::OneD::read(path).map_err(|e| e.to_string())?;
-    let column = oned
-        .column(0)
-        .filter(|c| !c.is_empty())
-        .ok_or_else(|| format!("{} has no numbers", path.display()))?;
-    Ok(crate::session::series::Stim {
+    if oned.rows == 0 || oned.cols == 0 {
+        return Err(format!("{} has no numbers", path.display()));
+    }
+    let labels = column_labels(&oned.comments);
+    let mut conditions = Vec::new();
+    for c in 0..oned.cols {
+        let Some(column) = oned.column(c) else {
+            continue;
+        };
+        let (lo, hi) = column
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &v| {
+                (l.min(v), h.max(v))
+            });
+        if oned.cols > 1 && lo == hi {
+            continue;
+        }
+        let label = labels
+            .get(c)
+            .filter(|l| !l.is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("#{}", c + 1));
+        conditions.push(Condition {
+            label,
+            on: stim_from_column(&column),
+        });
+    }
+    if conditions.is_empty() {
+        return Err(format!("{} has no varying column", path.display()));
+    }
+    Ok(Stim {
         name: path.file_name().map_or_else(
             || path.display().to_string(),
             |n| n.to_string_lossy().into(),
         ),
-        on: stim_from_column(&column),
+        conditions,
     })
 }
 
@@ -374,11 +422,46 @@ mod tests {
         std::fs::write(&path, "# a comment\n0\n0\n1\n1\n0\n1\n").unwrap();
         let stim = load_stim(&path).unwrap();
         assert_eq!(stim.name, "block.1D");
-        assert_eq!(stim.on, [false, false, true, true, false, true]);
+        assert_eq!(stim.conditions.len(), 1);
+        assert_eq!(
+            stim.conditions[0].on,
+            [false, false, true, true, false, true]
+        );
+        assert_eq!(stim.conditions[0].label, "#1");
         assert!(load_stim(&dir.path().join("missing.1D")).is_err());
         let empty = dir.path().join("empty.1D");
         std::fs::write(&empty, "# nothing\n").unwrap();
         assert!(load_stim(&empty).is_err());
+    }
+
+    #[test]
+    fn an_afni_3d_dataset_column_loads() {
+        let dir = crate::testutil::TempDir::new("niml");
+        let path = dir.path().join("ideal.1D");
+        std::fs::write(
+            &path,
+            "# <AFNI_3D_dataset\n#  ni_type = \"1*float\"\n# >\n 0\n 1\n 1\n 0\n# </AFNI_3D_dataset>\n",
+        )
+        .unwrap();
+        let stim = load_stim(&path).unwrap();
+        assert_eq!(stim.conditions[0].on, [false, true, true, false]);
+    }
+
+    #[test]
+    fn a_design_matrix_gives_one_condition_per_labeled_column() {
+        let dir = crate::testutil::TempDir::new("xmat");
+        let path = dir.path().join("X.xmat.1D");
+        std::fs::write(
+            &path,
+            "# ColumnLabels = \"sync#0 ; nosync#0 ; Run#1Pol#0\"\n\
+             0 0 1\n0.9 0 1\n0.8 0.9 1\n0 0.7 1\n",
+        )
+        .unwrap();
+        let stim = load_stim(&path).unwrap();
+        let labels: Vec<_> = stim.conditions.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["sync#0", "nosync#0"]);
+        assert_eq!(stim.conditions[0].on, [false, true, true, false]);
+        assert_eq!(stim.conditions[1].on, [false, false, true, true]);
     }
 
     // ---- the matrix ----

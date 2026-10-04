@@ -488,11 +488,22 @@ impl ViewArea {
         let input = self.graph_input(theme, t, cur);
         let (first, values, fit) = center_series(&input)
             .ok_or("the Graph has no time series to save: choose a 4D dataset in the Graph card")?;
-        let stim: Vec<(usize, usize)> = t
+        let stim: Vec<(usize, usize, [u8; 3])> = t
             .series
             .stim
             .as_ref()
-            .map(|s| crate::tools::graph::series::stim_blocks(&s.on))
+            .map(|s| {
+                s.conditions
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(i, c)| {
+                        let color = crate::session::series::condition_color(i);
+                        crate::tools::graph::series::stim_blocks(&c.on)
+                            .into_iter()
+                            .map(move |(a, b)| (a, b, color))
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         Ok(graph_image::render(
             size,

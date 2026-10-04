@@ -133,7 +133,10 @@ impl App {
                 SeriesChange::Fit(Some(fit)),
                 SeriesChange::Stim(Some(Stim {
                     name: "task blocks".into(),
-                    on: synthetic::bold_stimulus(),
+                    conditions: vec![crate::session::series::Condition {
+                        label: "task".into(),
+                        on: synthetic::bold_stimulus(),
+                    }],
                 })),
             ] {
                 app.session.apply(SessionAction::Series(change));
@@ -565,6 +568,14 @@ impl App {
                 }
                 SessionAction::Export(what) => {
                     let opts = self.current_export_options();
+                    self.export(what, &opts);
+                    continue;
+                }
+                SessionAction::ExportWithGraph(what) => {
+                    let opts = ExportOptions {
+                        graph: true,
+                        ..self.current_export_options()
+                    };
                     self.export(what, &opts);
                     continue;
                 }
@@ -2481,7 +2492,10 @@ mod tests {
         let mut app = graph_app();
         let stim = Stim {
             name: "blocks.1D".into(),
-            on: (0..40).map(|t| t % 10 >= 5).collect(),
+            conditions: vec![crate::session::series::Condition {
+                label: "blocks".into(),
+                on: (0..40).map(|t| t % 10 >= 5).collect(),
+            }],
         };
         app.apply(vec![SessionAction::Series(SeriesChange::Stim(Some(stim)))]);
         app.apply(vec![SessionAction::LoadDataset(

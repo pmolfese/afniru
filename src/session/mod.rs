@@ -620,6 +620,7 @@ impl Session {
             | Action::LoadStim
             | Action::LoadDataset(..)
             | Action::Export(_)
+            | Action::ExportWithGraph(_)
             | Action::ExportDialog(_)
             | Action::ScanFolder(_)
             | Action::CloseFolder(_)

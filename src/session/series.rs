@@ -44,8 +44,33 @@ impl Detrend {
 pub struct Stim {
     /// Where it came from (a file name), for the card.
     pub name: String,
+    /// One shaded set of blocks per regressor, each in its own color.
+    pub conditions: Vec<Condition>,
+}
+
+/// One on/off regressor of a [`Stim`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Condition {
+    /// Its label (a `.1D` column label, or `#1`, `#2`, …).
+    pub label: String,
     /// On or off at each time point.
     pub on: Vec<bool>,
+}
+
+/// The colors conditions are shaded in, in order: gold first (a lone
+/// regressor looks as it always has), then blue, magenta, green, red, teal.
+pub const CONDITION_COLORS: [[u8; 3]; 6] = [
+    [235, 175, 0],
+    [40, 140, 240],
+    [220, 60, 190],
+    [50, 180, 80],
+    [230, 70, 50],
+    [20, 175, 175],
+];
+
+/// The color of the `i`th condition.
+pub fn condition_color(i: usize) -> [u8; 3] {
+    CONDITION_COLORS[i % CONDITION_COLORS.len()]
 }
 
 /// The Graph view's settings (per controller).

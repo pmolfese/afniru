@@ -314,8 +314,8 @@ Decisions and gaps:
 
 Decisions and gaps:
 - The fit is drawn on the data's scale (percent of the *data's* mean, minus the trend removed from the data), so it stays on top of the points it fits.
-- The plot cannot be zoomed or panned yet; it shows the whole series.
-- The Graph is not part of saved images (the 2×2 grid leaves its cell empty).
+- Update (after M8): the plot zooms (drag a box; double-click resets), shows time and value on hover, and is saved in exported images. Panning by drag is still open (see Open follow-ups).
+- The stimulus can be a multi-column file (`X.stim.xmat.1D`): one shaded color per column, labeled from `ColumnLabels`; constant (baseline) columns are skipped.
 - Colors follow the theme (the first version was invisible on the light theme).
 
 ## Milestone 8 — Controllers A/B, Lock, Clone to compare ✅
@@ -335,25 +335,63 @@ Decisions and gaps:
 - With more than two controllers, compare shows A and the active one.
 - Pop-out windows are still Milestone 10.
 
+## Open follow-ups ⬜ (small items, not tied to a milestone)
+
+Graph and stimulus
+- [ ] Fit-vs-data scale: a fit dataset on a different baseline than the data (e.g. `errts` plotted with a `fitts` at ~100) sits far off the data and gives R² ≪ 0. Warn on the Graph card when the fit's mean differs wildly from the data's, and/or offer "scale fit to data"
+- [ ] Stimulus: per-condition show/hide and color picking in the Graph card; a legend on the plot and in exported Graph images; use `RowTR`/`RunStart` from a design matrix (draw run boundaries, check TR against the dataset's); optionally choose which columns of a matrix to show instead of "all varying"
+- [ ] Graph: drag to pan; hover and zoom for the matrix graph; "include the Graph" remembered in the export dialog
+
+Overlay / masks
+- [ ] Mask layers that need no dataset: today every mask layer makes you pick an overlay dataset even when its rule reads only other layers or sources (e.g. `a>3 && b<2`). A "rule-only" layer would skip that pick. Low priority; only if it proves annoying
+- [ ] p-value box: the TextEdit replaced the DragValue (typing `.05` works; no drag). Add drag back only if wanted
+
+Controllers
+- [ ] The "≠" marks inside B's cards (with A's value on hover) are not drawn; the toolbar chip lists differences instead
+- [ ] Compare with more than two controllers (today: A and the active one)
+- [ ] Layers are compared by position; consider matching by dataset
+
+Cards and tools
+- [ ] "Histogram" and "Atlas labels" chips in the Overlay card (come with their tools)
+
+Preferences
+- [ ] `~/.afniru` is upgraded at launch: settings added by a newer version are appended with their defaults and comments; the user's text is never changed; a commented-out setting stays off, a deleted line comes back. Keep `DEFAULT_FILE` (src/prefs.rs) in step with every new setting. (Implemented.)
+
+Menus
+- [ ] More menus like the mockup: File, Dataset, Overlay, View, Help. Needs its own planning pass on what each holds (see "Menus" in Later)
+
+Quality
+- [ ] A manual GUI pass over everything since M3 (the automated tests render but nobody has clicked through all of it)
+- [ ] Classic theme: check every card and the Graph against the AFNI look; show the team
+
 ## Milestone 9 — InstaCorr ⬜
 
-- [ ] Setup: dataset, ignore, blur, automask, despike, bandpass, seed radius (check `afni_instacorr.c`, `thd_incorrelate.c`)
-- [ ] Live r-map as an overlay layer hooked under InstaCorr ("feeds r-map"); Shift-drag scrubs the seed
+Decisions (from the user):
+1. **Seed:** Shift-click sets the initial seed. Holding Shift and dragging then moves the seed continuously, and the r-map updates live as you drag.
+2. **Defaults match AFNI** (check `afni_instacorr.c`, `thd_incorrelate.c`). The InstaCorr card offers the AFNI setup options, including **bandpass** and **polynomial detrend**, and the others AFNI has (ignore, blur, automask, despike, seed radius, …), laid out like AFNI's InstaCorr control.
+3. **The r-map is an overlay layer** hooked under InstaCorr ("feeds r-map"). The threshold is set by r, with p available too: one slider that can be read and set as r or as p (as in AFNI), using the number of degrees of freedom left after the detrend and bandpass.
+
+Tasks
+- [ ] Setup card: dataset, ignore, blur, automask, despike, bandpass, polynomial detrend order, seed radius, and the other AFNI InstaCorr options (engines: `afni-core` `instacorr.rs` and `signal.rs`: Detrend, bandpass vectors, OrtProjector, normalize_l2)
+- [ ] Live r-map as an overlay layer hooked under InstaCorr; Shift-click seeds, Shift-drag scrubs the seed with the map updating while dragging (compute off the interface thread, keep the last map until the new one is ready)
+- [ ] Threshold by r or by p on the same slider (p from r with the dof of the filtered series)
 - [ ] Seed ring drawn on views (`Tool::paint_view`); Graph shows seed mean vs. voxel with r
 - [ ] Workspace suggestion: turning InstaCorr on offers "Resting state"
-- [ ] Tests: correlation at known voxels matches AFNI's InstaCorr output on a small fixture
+- [ ] Tests: correlation at known voxels matches AFNI's InstaCorr output on a small fixture; threshold r↔p round trip; seed drag updates the map
 
 ## Milestone 10 — Pop-out windows ⬜
 
-- [ ] Controller pops out into its own egui viewport and docks back
+- [ ] A controller (A, B, …) **pops out** into its own egui viewport and **pops back in** (a button on the tab or its right-click menu), so several controllers need not crowd one window. The popped controller keeps its views, cards and Graph; the Session is shared, so Link and Compare keep working across windows
 - [ ] Single cards pop out (e.g. Clusterize on a second monitor)
-- [ ] Window positions remembered per workspace
+- [ ] Closing a popped-out window docks it back; window positions remembered per workspace
+- [ ] Decide how the compare layout behaves when one of the pair is in its own window
 
 ## Later (unordered) ⬜
 
 - [ ] Atlas / Whereami card (and "Atlas labels" attached to overlays/clusters)
 - [ ] Draw ROI (brush cursor on views; save with `Brik::write`)
-- [ ] Montage
+- [ ] Montage in the viewer (saved montages exist)
+- [ ] Menus (File, Dataset, Overlay, View, Help): decide what each holds, then build
 - [ ] Save PNG / image sequences; `-com`-style scripting (`Action` from text)
 - [ ] NIML link with sumaru and classic AFNI (crosshair sync); reuse sumaru's `afni.rs` and capture fixtures
 - [ ] Publication figures: with a white canvas the image's own background voxels (zeros) stay black. Needs an option to draw background (or below-window) voxels as transparent/white
@@ -393,3 +431,4 @@ Decisions and gaps:
 - 2026-10-03 — Background loading (`loader.rs`): datasets read on worker threads, applied in the order asked for, with name/size/elapsed shown; folders list their datasets (`AFNIRU_FOLDER_BROWSER`), loading only what is picked; replaced or removed datasets are freed. B keeps the fill. The AFNI logo is the window/dock icon.
 - 2026-10-03 — Slice numbers (right-click: on/off, corner, size; one setting for all views; `AFNIRU_SLICE_NUMBER*` in `~/.afniru`) and saving images (`render/export.rs`: slice, three views as row/column/grid/files, montages; PNG; a built-in pixel font draws the numbers and letters). The Graph is not included in saved images yet.
 - 2026-10-03 — M8 done: controllers A/B/…, clone to compare, side-by-side compare layout, linked crosshair and zoom, differences chip. Also: the Graph can be zoomed (drag a box), shows time point and value on hover, and is saved in exported images; saved images use one text size across the views; the rail's traffic-light pop-up opens beside the rail; `-R` lists subfolders.
+- 2026-10-04 — Classic theme (AFNI black and orange) and the Graph docked under the views in the row layout. Then: p-value box takes typed values like `.05`; stimulus from multi-column design matrices with a color per condition (graph and export); "+ Graph" in the quick "Save the three views" menu; `~/.afniru` gains new settings (with defaults) at launch without touching the user's text. M9 decisions recorded; open follow-ups listed above.
