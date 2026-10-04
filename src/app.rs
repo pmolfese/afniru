@@ -165,6 +165,9 @@ impl App {
         if let Some(saved) = eframe::get_value::<Recents>(storage, RECENTS_STORAGE_KEY) {
             self.recents = saved;
         }
+        if !self.prefs.recent_overlays {
+            self.recents.clear(RecentKind::Overlay);
+        }
     }
 
     /// Look for an `afni_proc.py` run: first in the `explicit` directories
@@ -410,6 +413,7 @@ impl App {
     fn note_loaded(&mut self, kind: RecentKind, id: crate::session::DatasetId) {
         if let Some(d) = self.session.store.get(id)
             && let Source::File(path) = &d.source
+            && (kind != RecentKind::Overlay || self.prefs.recent_overlays)
         {
             self.recents.note(kind, path);
         }
@@ -423,7 +427,10 @@ impl App {
             match loaded.result {
                 Ok(d) => {
                     self.error = None;
-                    self.recents.note(RecentKind::of(loaded.role), &loaded.path);
+                    let kind = RecentKind::of(loaded.role);
+                    if kind != RecentKind::Overlay || self.prefs.recent_overlays {
+                        self.recents.note(kind, &loaded.path);
+                    }
                     match loaded.role {
                         LoadRole::GraphSource if d.nvols < 2 => {
                             self.error = Some(format!(
@@ -2183,6 +2190,7 @@ mod tests {
             show: true,
             corner: crate::render::label::Corner::BottomRight,
             size: crate::render::label::LabelSize::ExtraLarge,
+            by_index: false,
         };
         let p = dir.path().join("number.png");
         app.export_to(ExportWhat::Slice(Plane::Axial), &opts, &p);
@@ -2684,6 +2692,7 @@ mod tests {
             &[],
             false,
         );
+        app.prefs.recent_overlays = true; // overlays are remembered only if asked
         let fx = fixtures_dir();
         let load = |app: &mut App, name: &str, role| {
             app.apply(vec![SessionAction::LoadDataset(fx.join(name), role)]);
@@ -2730,6 +2739,60 @@ mod tests {
             harness.state().recents.list(RecentKind::Underlay)[0],
             fx.join("tiny2+orig")
         );
+    }
+
+    #[test]
+    fn overlay_datasets_are_not_remembered_unless_the_afniru_file_asks() {
+        let fx = fixtures_dir();
+        let mut app = App::new(
+            prefs(ThemeChoice::Dark, CanvasBackground::Black),
+            &[],
+            false,
+        );
+        assert!(!app.prefs.recent_overlays, "off by default");
+        for (name, role) in [
+            ("tiny2+orig", LoadRole::Underlay),
+            ("stat+orig", LoadRole::Overlay),
+        ] {
+            app.apply(vec![SessionAction::LoadDataset(fx.join(name), role)]);
+            app.poll_loads();
+        }
+        assert_eq!(app.recents.list(RecentKind::Underlay).len(), 1);
+        assert!(app.recents.list(RecentKind::Overlay).is_empty());
+        // An overlay chosen from those already loaded is not remembered either.
+        let id = app.session.controller().overlays[0].dataset;
+        app.apply(vec![SessionAction::AddOverlay(id)]);
+        assert!(app.recents.list(RecentKind::Overlay).is_empty());
+        // Asked for in the file, they are.
+        let p = Prefs::parse("AFNIRU_RECENT_OVERLAYS = YES");
+        assert!(p.recent_overlays);
+        // A stored overlay list is dropped on restore when the option is off.
+        let mut stored = Recents::default();
+        stored.note(RecentKind::Overlay, &fx.join("stat+orig"));
+        stored.note(RecentKind::Underlay, &fx.join("tiny2+orig"));
+        let mut mem = std::collections::HashMap::new();
+        struct Mem<'a>(&'a mut std::collections::HashMap<String, String>);
+        impl eframe::Storage for Mem<'_> {
+            fn get_string(&self, k: &str) -> Option<String> {
+                self.0.get(k).cloned()
+            }
+            fn set_string(&mut self, k: &str, v: String) {
+                self.0.insert(k.into(), v);
+            }
+            fn remove_string(&mut self, k: &str) {
+                self.0.remove(k);
+            }
+            fn flush(&mut self) {}
+        }
+        eframe::set_value(&mut Mem(&mut mem), RECENTS_STORAGE_KEY, &stored);
+        let mut fresh = App::new(
+            prefs(ThemeChoice::Dark, CanvasBackground::Black),
+            &[],
+            false,
+        );
+        fresh.restore(&Mem(&mut mem));
+        assert!(fresh.recents.list(RecentKind::Overlay).is_empty());
+        assert_eq!(fresh.recents.list(RecentKind::Underlay).len(), 1);
     }
 
     #[test]
@@ -3342,6 +3405,50 @@ mod tests {
             .current_mut()
             .toggle_collapsed(ToolId::Datasets);
         snapshot("compare_a_b", app, vec2(1500.0, 800.0), None);
+    }
+
+    // ---- Classic theme and the docked Graph ----
+
+    #[test]
+    fn the_classic_theme_is_chosen_in_the_afniru_file() {
+        let p = Prefs::parse("AFNIRU_THEME = Classic");
+        assert_eq!(p.theme, ThemeChoice::Classic);
+        let t = Theme::resolve(&p, false);
+        assert!(t.classic && t.dark);
+        assert_eq!(t.accent, egui::Color32::from_rgb(255, 176, 0));
+        // The others are not classic, and the choice does not depend on the OS.
+        assert!(!Theme::resolve(&Prefs::parse("AFNIRU_THEME = Dark"), false).classic);
+        assert!(Theme::resolve(&p, true).classic);
+    }
+
+    #[test]
+    fn in_the_row_layout_the_graph_is_docked_under_the_three_views() {
+        let mut app = App::new(
+            prefs(ThemeChoice::Classic, CanvasBackground::Black),
+            &[],
+            true,
+        );
+        app.options.layout = crate::ui::view_state::Layout::Row;
+        let mut harness = run_frames(app, vec2(1500.0, 800.0));
+        let y = |h: &egui_kittest::Harness<'_, App>, v: &str| {
+            h.get_all_by_value(v).next().unwrap().rect().min
+        };
+        let (axial, graph) = (y(&harness, "Axial"), y(&harness, "Graph"));
+        assert!(graph.y > axial.y + 200.0, "the Graph is below the views");
+        assert!(graph.x < 500.0, "and starts at the left edge");
+        // Without a time series (a plain demo underlay with no graph dataset) there is none.
+        let mut plain = App::new(
+            prefs(ThemeChoice::Classic, CanvasBackground::Black),
+            &[],
+            true,
+        );
+        plain
+            .session
+            .apply(SessionAction::Series(SeriesChange::Source(None)));
+        plain.options.layout = crate::ui::view_state::Layout::Row;
+        let harness2 = run_frames(plain, vec2(1500.0, 800.0));
+        assert!(harness2.query_all_by_value("Graph").next().is_none());
+        harness.snapshot("classic_row_with_graph");
     }
 
     // ---- Clusterize ----

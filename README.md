@@ -58,6 +58,8 @@ double-click shows the whole image.
 
 ## The Graph
 
+In the 1×3 row layout the Graph is docked across the bottom, under the three views, whenever there is a time series to plot (a Graph dataset was chosen, or the underlay is 4D). `AFNIRU_THEME = Classic` in `~/.afniru` gives AFNI's own black-and-orange look.
+
 The fourth cell of the 2×2 layout plots the time series at the crosshair
 (click or drag in it to change the time point shown). The Graph card chooses the
 dataset (any dataset with several time points, not only the underlay), a **Fit**

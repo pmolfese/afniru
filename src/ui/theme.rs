@@ -20,6 +20,8 @@ pub const SAGITTAL: Color32 = Color32::from_rgb(242, 140, 72);
 pub struct Theme {
     /// True for the dark variant.
     pub dark: bool,
+    /// The "classic" look: AFNI's black and orange, squarer and a bit larger.
+    pub classic: bool,
     /// Window background behind cards.
     pub bg: Color32,
     /// Controller sidebar.
@@ -62,6 +64,7 @@ impl Theme {
     pub fn dark() -> Self {
         Self {
             dark: true,
+            classic: false,
             bg: Color32::from_rgb(17, 19, 23),
             panel: Color32::from_rgb(24, 27, 32),
             card: Color32::from_rgb(29, 32, 38),
@@ -82,10 +85,37 @@ impl Theme {
         }
     }
 
+    /// The classic theme, a nod to the original AFNI: near-black panels, white
+    /// text, and AFNI's orange for everything that is selected or active.
+    pub fn classic() -> Self {
+        Self {
+            dark: true,
+            classic: true,
+            bg: Color32::from_rgb(8, 10, 16),
+            panel: Color32::from_rgb(17, 19, 27),
+            card: Color32::from_rgb(11, 13, 20),
+            card_hi: Color32::from_rgb(30, 33, 44),
+            border: Color32::from_rgb(58, 62, 76),
+            text: Color32::from_rgb(240, 242, 246),
+            text_dim: Color32::from_rgb(176, 182, 194),
+            text_faint: Color32::from_rgb(116, 122, 136),
+            accent: Color32::from_rgb(255, 176, 0),
+            accent_dim: Color32::from_rgb(96, 66, 0),
+            error: Color32::from_rgb(255, 110, 100),
+            good: Color32::from_rgb(70, 200, 120),
+            caution: Color32::from_rgb(255, 176, 0),
+            danger: Color32::from_rgb(240, 80, 70),
+            unknown: Color32::from_rgb(126, 132, 146),
+            select: Color32::from_rgb(255, 176, 0),
+            canvas: Color32::BLACK,
+        }
+    }
+
     /// The light theme.
     pub fn light() -> Self {
         Self {
             dark: false,
+            classic: false,
             bg: Color32::from_rgb(232, 235, 240),
             panel: Color32::from_rgb(246, 247, 249),
             card: Color32::from_rgb(255, 255, 255),
@@ -108,12 +138,13 @@ impl Theme {
 
     /// Pick the theme for this frame: the preference, or the OS appearance.
     pub fn resolve(prefs: &Prefs, system_dark: bool) -> Self {
-        let dark = match prefs.theme {
-            ThemeChoice::Dark => true,
-            ThemeChoice::Light => false,
-            ThemeChoice::System => system_dark,
+        let mut t = match prefs.theme {
+            ThemeChoice::Classic => Self::classic(),
+            ThemeChoice::Dark => Self::dark(),
+            ThemeChoice::Light => Self::light(),
+            ThemeChoice::System if system_dark => Self::dark(),
+            ThemeChoice::System => Self::light(),
         };
-        let mut t = if dark { Self::dark() } else { Self::light() };
         t.canvas = match prefs.canvas {
             CanvasBackground::Black => Color32::BLACK,
             CanvasBackground::White => Color32::WHITE,
@@ -136,7 +167,7 @@ impl Theme {
         v.selection.bg_fill = self.accent;
         v.selection.stroke = Stroke::new(1.0, self.accent);
         v.slider_trailing_fill = true;
-        let r = CornerRadius::same(5);
+        let r = CornerRadius::same(if self.classic { 2 } else { 5 });
         for w in [
             &mut v.widgets.noninteractive,
             &mut v.widgets.inactive,
@@ -157,10 +188,11 @@ impl Theme {
             s.spacing.item_spacing = vec2(6.0, 6.0);
             s.spacing.button_padding = vec2(8.0, 3.0);
             s.spacing.interact_size.y = 22.0;
+            let body = if self.classic { 14.0 } else { 13.0 };
             s.text_styles
-                .insert(egui::TextStyle::Body, FontId::proportional(13.0));
+                .insert(egui::TextStyle::Body, FontId::proportional(body));
             s.text_styles
-                .insert(egui::TextStyle::Button, FontId::proportional(13.0));
+                .insert(egui::TextStyle::Button, FontId::proportional(body));
             s.text_styles
                 .insert(egui::TextStyle::Small, FontId::proportional(11.0));
             s.text_styles

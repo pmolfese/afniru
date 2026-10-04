@@ -244,6 +244,8 @@ impl PlaneCard {
         let mut label = cx.options.slice_label;
         ui.checkbox(&mut label.show, "Slice number")
             .on_hover_text("Draw the slice number on every view");
+        ui.checkbox(&mut label.by_index, "Index instead of mm")
+            .on_hover_text("Write the slice index (3) instead of its position (33S)");
         ui.menu_button("Number position", |ui| {
             for corner in Corner::ALL {
                 if ui
@@ -486,7 +488,12 @@ impl PlaneCard {
             } else {
                 rect
             };
-            slice_number(&painter, shown, key_index(cur, map), &label);
+            slice_number(
+                &painter,
+                shown,
+                &label_text(cx.ds, self.plane, key_index(cur, map), label.by_index),
+                &label,
+            );
         }
         scale_bar(&painter, canvas, fit * zoom, ink);
         painter.text(
@@ -636,7 +643,12 @@ pub fn export_tile(
             i64::from((opts.zoom / 4).max(1)),
         );
     }
-    export::draw_slice_number(&mut img, index, &opts.label, text_reference);
+    export::draw_slice_number(
+        &mut img,
+        &label_text(ds, plane, index, opts.label.by_index),
+        &opts.label,
+        text_reference,
+    );
     if letters {
         img = export::with_letters(
             &img,
@@ -677,9 +689,24 @@ fn key_index(cur: &Cursor, map: &PlaneMap) -> usize {
     cur.ijk[map.fixed_axis]
 }
 
+/// The text of the slice label, as AFNI writes it: the slice's position in mm
+/// with the letter of its side (`33S`, `12R`), or, with `by_index`
+/// (`AFNI_IMAGE_LABEL_IJK`), its index.
+pub fn label_text(ds: &Dataset, plane: Plane, index: usize, by_index: bool) -> String {
+    if by_index {
+        return index.to_string();
+    }
+    let mut ijk = [0; 3];
+    ijk[ds.orient.slice_axis(plane)] = index;
+    let (mag, letter) =
+        magnitude_and_letter(ijk_to_ras(&ds.ijk_to_ras, ijk))[plane.fixed_ras_axis()];
+    let mm = format!("{mag:.1}");
+    format!("{}{letter}", mm.strip_suffix(".0").unwrap_or(&mm))
+}
+
 /// The slice number in its corner of the image, white with a dark shadow so it
 /// reads on any picture.
-fn slice_number(painter: &egui::Painter, image: Rect, number: usize, label: &SliceLabel) {
+fn slice_number(painter: &egui::Painter, image: Rect, text: &str, label: &SliceLabel) {
     let font = FontId::monospace(label.size.points());
     let m = 6.0;
     let (anchor, align) = match label.corner {
@@ -688,14 +715,13 @@ fn slice_number(painter: &egui::Painter, image: Rect, number: usize, label: &Sli
         Corner::BottomLeft => (image.left_bottom() + vec2(m, -m), Align2::LEFT_BOTTOM),
         Corner::BottomRight => (image.right_bottom() + vec2(-m, -m), Align2::RIGHT_BOTTOM),
     };
-    let text = number.to_string();
     for d in [
         vec2(1.0, 1.0),
         vec2(-1.0, 1.0),
         vec2(1.0, -1.0),
         vec2(-1.0, -1.0),
     ] {
-        painter.text(anchor + d, align, &text, font.clone(), Color32::BLACK);
+        painter.text(anchor + d, align, text, font.clone(), Color32::BLACK);
     }
     painter.text(anchor, align, text, font, Color32::WHITE);
 }
@@ -736,6 +762,19 @@ fn nice_length_mm(target: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::data::synthetic;
+
+    #[test]
+    fn the_slice_label_is_the_position_in_mm_with_its_side_like_afni() {
+        let ds = synthetic::phantom();
+        // Phantom: z = -75 at k = 0 (I), +1 mm per slice; x = +75 at i = 0 (R).
+        assert_eq!(label_text(&ds, Plane::Axial, 0, false), "75I");
+        assert_eq!(label_text(&ds, Plane::Axial, 100, false), "25S");
+        assert_eq!(label_text(&ds, Plane::Axial, 75, false), "0S");
+        assert_eq!(label_text(&ds, Plane::Sagittal, 0, false), "75R");
+        assert_eq!(label_text(&ds, Plane::Sagittal, 149, false), "74L");
+        // AFNI_IMAGE_LABEL_IJK: the index instead.
+        assert_eq!(label_text(&ds, Plane::Axial, 100, true), "100");
+    }
 
     #[test]
     fn nice_lengths() {

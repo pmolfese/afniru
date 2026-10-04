@@ -29,6 +29,8 @@ pub enum ThemeChoice {
     Dark,
     /// Always light.
     Light,
+    /// AFNI's own look: black and orange.
+    Classic,
 }
 
 /// Background behind slice images.
@@ -44,7 +46,7 @@ pub enum CanvasBackground {
 /// Parsed preferences.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prefs {
-    /// `AFNIRU_THEME = System | Dark | Light`.
+    /// `AFNIRU_THEME = System | Dark | Light | Classic`.
     pub theme: ThemeChoice,
     /// `AFNIRU_CANVAS_BACKGROUND = Black | White`.
     pub canvas: CanvasBackground,
@@ -64,6 +66,9 @@ pub struct Prefs {
     /// `AFNIRU_SLICE_NUMBER`, `_CORNER` and `_SIZE`: the slice number drawn on
     /// each image (also the starting point of the right-click menu).
     pub slice_label: SliceLabel,
+    /// `AFNIRU_RECENT_OVERLAYS = YES | NO`: remember recently chosen overlay
+    /// datasets between runs and offer them in the dropdowns (default NO).
+    pub recent_overlays: bool,
 }
 
 impl Default for Prefs {
@@ -77,6 +82,7 @@ impl Default for Prefs {
             sess_trail: 0,
             folder_browser: true,
             slice_label: SliceLabel::default(),
+            recent_overlays: false,
         }
     }
 }
@@ -99,6 +105,7 @@ pub const DEFAULT_FILE: &str = "\
 // ---- Appearance --------------------------------------------------------
 
    AFNIRU_THEME             = System  // System (follow macOS) | Dark | Light
+                                      // | Classic (AFNI's black and orange)
 
    AFNIRU_CANVAS_BACKGROUND = Black   // Black | White; behind slice images.
                                       // White is for publication figures.
@@ -135,6 +142,13 @@ pub const DEFAULT_FILE: &str = "\
    AFNIRU_SLICE_NUMBER      = NO      // YES = draw the slice number on every
                                       //       image (also set by the right-click
                                       //       menu of an image)
+   AFNI_IMAGE_LABEL_IJK     = NO      // NO  = the label is the slice's position
+                                      //       in mm with its side (33S, 12R),
+                                      //       as in AFNI; YES = its index
+   AFNIRU_RECENT_OVERLAYS   = NO      // YES = remember the overlay datasets you
+                                      //       chose last time and list them in
+                                      //       the dropdowns (underlay and Graph
+                                      //       always are)
    AFNIRU_SLICE_NUMBER_CORNER = TL    // TL | TR | BL | BR
    AFNIRU_SLICE_NUMBER_SIZE = Medium  // Small | Medium | Large | XL
 
@@ -211,6 +225,7 @@ impl Prefs {
                 "system" => self.theme = ThemeChoice::System,
                 "dark" => self.theme = ThemeChoice::Dark,
                 "light" => self.theme = ThemeChoice::Light,
+                "classic" => self.theme = ThemeChoice::Classic,
                 _ => {}
             },
             "AFNIRU_CANVAS_BACKGROUND" => match value.as_str() {
@@ -226,6 +241,16 @@ impl Prefs {
             "AFNIRU_SLICE_NUMBER" => match value.as_str() {
                 "yes" | "true" | "1" => self.slice_label.show = true,
                 "no" | "false" | "0" => self.slice_label.show = false,
+                _ => {}
+            },
+            "AFNI_IMAGE_LABEL_IJK" => match value.as_str() {
+                "yes" | "true" | "1" => self.slice_label.by_index = true,
+                "no" | "false" | "0" => self.slice_label.by_index = false,
+                _ => {}
+            },
+            "AFNIRU_RECENT_OVERLAYS" => match value.as_str() {
+                "yes" | "true" | "1" => self.recent_overlays = true,
+                "no" | "false" | "0" => self.recent_overlays = false,
                 _ => {}
             },
             "AFNIRU_SLICE_NUMBER_CORNER" => {

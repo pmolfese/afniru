@@ -411,7 +411,10 @@ impl ViewArea {
         };
 
         let area = ui.available_rect_before_wrap();
-        let cells = cell_rects(area, self.options.layout);
+        // In the row layout the Graph is docked under the views when there is a
+        // time series to plot: a graph dataset was chosen, or the underlay is 4D.
+        let graph_docked = t.series.source.is_some() || ds.nvols > 1;
+        let cells = cell_rects_with_graph(area, self.options.layout, graph_docked);
         // Axial, sagittal, coronal, then the Graph (AFNI's usual arrangement).
         let order = [Plane::Axial, Plane::Sagittal, Plane::Coronal];
         let mut label_change = None;
@@ -840,6 +843,22 @@ fn build_overlay(under: &Dataset, over: &Dataset, layer: &OverlayLayer) -> Optio
 /// Rectangles for the cells of `layout` inside `area`: three planes, plus the
 /// Graph as a fourth in the grid.
 pub fn cell_rects(area: Rect, layout: Layout) -> Vec<Rect> {
+    cell_rects_with_graph(area, layout, false)
+}
+
+/// [`cell_rects`], and with `graph` the row layout gets a fourth cell: the
+/// Graph across the whole bottom, under the three views.
+pub fn cell_rects_with_graph(area: Rect, layout: Layout, graph: bool) -> Vec<Rect> {
+    if layout == Layout::Row && graph {
+        let top_h = (area.height() - GAP) * 0.62;
+        let top = Rect::from_min_size(area.min, vec2(area.width(), top_h));
+        let mut cells = cell_rects(top, Layout::Row);
+        cells.push(Rect::from_min_max(
+            pos2(area.left(), area.top() + top_h + GAP),
+            area.max,
+        ));
+        return cells;
+    }
     let split = |n: usize, horizontal: bool| -> Vec<Rect> {
         (0..n)
             .map(|i| {
@@ -916,6 +935,12 @@ mod tests {
         assert_eq!(grid[1].left(), 504.0);
         assert_eq!(grid[2].top(), 304.0);
         assert_eq!(cell_rects(area, Layout::Row).len(), 3);
+        // With a graph the row layout docks it across the bottom.
+        let docked = cell_rects_with_graph(area, Layout::Row, true);
+        assert_eq!(docked.len(), 4);
+        assert_eq!(docked[3].width(), 1000.0);
+        assert!(docked[3].top() > docked[0].bottom() && docked[3].bottom() == 600.0);
+        assert_eq!(cell_rects_with_graph(area, Layout::Column, true).len(), 3);
         assert_eq!(cell_rects(area, Layout::Column).len(), 3);
         // Cells stay inside the area and do not overlap.
         for layout in [Layout::Row, Layout::Column, Layout::Grid] {

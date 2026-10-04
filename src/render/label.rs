@@ -128,6 +128,9 @@ pub struct SliceLabel {
     pub corner: Corner,
     /// How big.
     pub size: LabelSize,
+    /// Write the slice index instead of its position in mm (AFNI's
+    /// `AFNI_IMAGE_LABEL_IJK`).
+    pub by_index: bool,
 }
 
 #[cfg(test)]

@@ -147,7 +147,7 @@ fn text_px(height: usize, fraction: f32) -> f32 {
 /// size in all of them, whatever their own heights (`None`: the picture's own).
 pub fn draw_slice_number(
     img: &mut Rgba8Image,
-    number: usize,
+    text: &str,
     label: &SliceLabel,
     reference: Option<usize>,
 ) {
@@ -155,8 +155,7 @@ pub fn draw_slice_number(
         return;
     }
     let px = text_px(reference.unwrap_or(img.height), label.size.fraction());
-    let text = number.to_string();
-    let (w, h) = text::measure(&text, px);
+    let (w, h) = text::measure(text, px);
     let margin = (px * 0.35) as i64;
     let (w, h) = (w as i64, h as i64);
     let (x, y) = match label.corner {
@@ -170,7 +169,7 @@ pub fn draw_slice_number(
     };
     text::draw(
         img,
-        &text,
+        text,
         (x, y),
         px,
         [255, 255, 255],
@@ -435,8 +434,9 @@ mod tests {
                 show: true,
                 corner,
                 size: LabelSize::Large,
+                by_index: false,
             };
-            draw_slice_number(&mut img, 75, &label, None);
+            draw_slice_number(&mut img, "75", &label, None);
             let (left, top) = (
                 matches!(corner, Corner::TopLeft | Corner::BottomLeft),
                 matches!(corner, Corner::TopLeft | Corner::TopRight),
@@ -459,8 +459,9 @@ mod tests {
                 show,
                 corner: Corner::TopLeft,
                 size,
+                by_index: false,
             };
-            draw_slice_number(&mut img, 8, &label, None);
+            draw_slice_number(&mut img, "8", &label, None);
             (0..300)
                 .flat_map(|y| (0..300).map(move |x| (x, y)))
                 .filter(|&(x, y)| img.get(x, y)[0] >= 200)
@@ -477,6 +478,7 @@ mod tests {
             show: true,
             corner: Corner::TopLeft,
             size: LabelSize::Large,
+            by_index: false,
         };
         // Height of the white-ish text in the top left corner.
         let text_height = |img: &Rgba8Image| {
@@ -486,14 +488,14 @@ mod tests {
         };
         let mut short = solid(300, 150, [60, 60, 60]);
         let mut tall = solid(300, 400, [60, 60, 60]);
-        draw_slice_number(&mut short, 96, &label, Some(400));
-        draw_slice_number(&mut tall, 96, &label, Some(400));
+        draw_slice_number(&mut short, "96", &label, Some(400));
+        draw_slice_number(&mut tall, "96", &label, Some(400));
         assert_eq!(text_height(&short), text_height(&tall));
         // Without a shared reference the taller picture gets bigger text.
         let mut short = solid(300, 150, [60, 60, 60]);
         let mut tall = solid(300, 400, [60, 60, 60]);
-        draw_slice_number(&mut short, 96, &label, None);
-        draw_slice_number(&mut tall, 96, &label, None);
+        draw_slice_number(&mut short, "96", &label, None);
+        draw_slice_number(&mut tall, "96", &label, None);
         assert!(text_height(&tall) > text_height(&short));
         // The same holds for the orientation letters' frame.
         let a = with_letters(

@@ -54,6 +54,10 @@ pub struct ProcessingRail {
     /// Detail window open for the selected step.
     #[serde(skip)]
     pub detail_open: bool,
+    /// Has the selected step been collapsed by clicking it again? (A selected
+    /// step is otherwise expanded: its reason, View and details button.)
+    #[serde(skip)]
+    pub expansion_closed: bool,
     /// The step whose status pop-up is showing (the pointer is over its
     /// traffic light or over the pop-up).
     #[serde(skip)]
@@ -448,7 +452,7 @@ impl ProcessingRail {
                 // So the arrow keys work right after a click.
                 ui.ctx().memory_mut(|m| m.request_focus(row_ids[i]));
             }
-            if selected {
+            if selected && !self.expansion_closed {
                 self.expanded(ui, theme, step, i + 1 == n, events);
             }
         }
@@ -505,13 +509,19 @@ impl ProcessingRail {
             // open its checks and files.
             model.select(Some(id));
             self.detail_open = true;
+            self.expansion_closed = false;
             self.status_popup = None;
             self.popup_rect = None;
         } else if let Some(id) = clicked {
             if model.selected.as_ref() == Some(&id) {
-                // Clicking the selected step again leaves it selected but
-                // closes the expansion's detail window.
-                self.detail_open = false;
+                // Clicking the selected step again collapses it (and closes its
+                // detail window); clicking once more expands it.
+                self.expansion_closed = !self.expansion_closed;
+                if self.expansion_closed {
+                    self.detail_open = false;
+                }
+            } else {
+                self.expansion_closed = false;
             }
             model.select(Some(id));
         }
@@ -899,6 +909,33 @@ mod tests {
         h.get_by_label_contains("View").click();
         h.run();
         assert_eq!(h.state().events, [RailEvent::View(StepId("blur".into()))]);
+    }
+
+    #[test]
+    fn clicking_the_selected_step_again_collapses_it_and_a_third_click_expands_it() {
+        let (_tmp, model) = mixed();
+        let mut h = harness(vec2(1300.0, 640.0), state(true, model));
+        h.run();
+        let view_shown = |h: &egui_kittest::Harness<'_, _>| {
+            h.query_all_by_label_contains("View").next().is_some()
+        };
+        h.get_by_label("Smoothing, Good").click();
+        h.run();
+        assert!(view_shown(&h), "a clicked step expands");
+        h.get_by_label("Smoothing, Good").click();
+        h.run();
+        assert!(!view_shown(&h), "clicking it again collapses it");
+        assert!(!h.state().rail.detail_open);
+        h.get_by_label("Smoothing, Good").click();
+        h.run();
+        assert!(view_shown(&h), "and again expands it");
+        // Selecting another step expands that one.
+        h.get_by_label("Smoothing, Good").click();
+        h.run();
+        h.get_by_label("Alignment, Caution").click();
+        h.run();
+        assert_eq!(h.state().model.selected, Some(StepId("align".into())));
+        assert!(view_shown(&h));
     }
 
     #[test]

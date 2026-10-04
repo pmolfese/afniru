@@ -58,6 +58,15 @@ impl Recents {
         }
     }
 
+    /// Forget the list for `kind`.
+    pub fn clear(&mut self, kind: RecentKind) {
+        match kind {
+            RecentKind::Underlay => self.underlay.clear(),
+            RecentKind::Overlay => self.overlay.clear(),
+            RecentKind::Graph => self.graph.clear(),
+        }
+    }
+
     /// Remember that `path` was chosen for `kind`: it moves to the top, and
     /// the list keeps its last [`KEEP`].
     pub fn note(&mut self, kind: RecentKind, path: &Path) {
