@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 afni-core = { git = "https://github.com/pmolfese/afni-core", branch = "main" }
-afni-io = { path = "../afni-io" }
+afni-io = { git = "https://github.com/pmolfese/afni-io", branch = "main" }
 # Smooth text in saved images (the font egui already carries).
 ab_glyph = "0.2"
 anyhow = "1"
