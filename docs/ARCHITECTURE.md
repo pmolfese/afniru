@@ -8,7 +8,7 @@ file describes only what exists now, and grows with the code.
 | `main.rs` | CLI (`clap`), loads preferences, launches eframe. Nothing else. |
 | `app.rs` | `App`: the `eframe::App`. Owns the preferences, the `Session`, the `ViewArea` and the `ControllerUi`. One frame (`draw`): resolve theme, handle dropped files, draw the shell, the controller (collecting `session::Action`s, applied right away), the readout and the views; returns the shell's own `Action`. Saves the controller state through eframe storage. |
 | `prefs.rs` | `~/.afniru` in `~/.afnirc` format. Created with documented defaults on first run, never overwritten. |
-| `data/` | `Dataset`: a volume (read by `afni-io`, or synthetic) plus its summary (grid, voxel size, labels, TR). `load.rs` reads files; `synthetic.rs` is the demo phantom. |
+| `data/` | `Dataset`: a volume (read by `afni-io`, or synthetic) plus display metadata (grid, voxel size, labels, TR). `load.rs` reads files; `synthetic.rs` is the demo phantom. |
 | `ui/theme.rs` | Dark/light color tokens over egui's stock visuals. Follows macOS unless overridden. The slice canvas color is separate (black or white). |
 | `geom/` | `orient.rs`: `GridOrient` (which voxel axis is R/A/S, from the matrix), `Plane` and its screen conventions (radiological by default, anterior up in axial, superior up elsewhere). `coords.rs`: voxel ↔ world, and the `CoordOrient` display conventions RAI/LPI. |
 | `render/slice.rs` | `PlaneMap`: the one place that maps pixels ↔ voxels for a plane. `extract`: one slice in screen orientation, with edge letters and pixel size. Pure functions over `&[f32]`. |
@@ -52,6 +52,19 @@ Statistics, colors, thresholds, compositing and the `3dcalc` expression evaluato
 (which `afni-io` also re-exports). afniru depends on `afni-core` from the same
 git source as `afni-io`, so the types are one and the same; the git-ignored
 `.cargo/config.toml` patches both to the local checkout.
+
+For dataset calculations, use the intent-oriented processing vocabulary from
+`afni-core`: `combine_columns` combines selected sub-bricks into one derived
+column; `Dataset::summarize_time_series` computes standard temporal statistics;
+`summarize_time_series_with` handles a custom one- or multi-output temporal
+calculation; and `transform_time_series` returns a same-length transformed
+dataset. `SummaryOutput` describes each custom result. Avoid reintroducing the
+older implementation-shaped `map_*`, `*_rows_*`, or `*_to_f64` names.
+
+The existing Graph arithmetic operates on one already-extracted series for
+interactive display, so it directly uses `afni_core::signal::Detrend` rather
+than building a whole core dataset. Future whole-volume tools should use the
+dataset operations above.
 
 ## Where this differs from the plan
 

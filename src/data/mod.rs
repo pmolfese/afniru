@@ -1,8 +1,8 @@
 //! Datasets: what afniru knows about a volume on disk (or a synthetic one).
 //!
-//! [`Dataset`] holds a cheap summary (name, grid, voxel size, sub-brick labels,
-//! TR) next to the voxel data, so the UI never has to ask `afni-io` for it
-//! again. Voxel order is `i + nx * (j + ny * k)`, as in `afni-io`.
+//! [`Dataset`] holds display metadata (name, grid, voxel size, sub-brick
+//! labels, TR) next to the voxel data, so the UI never has to ask `afni-io`
+//! for it again. Voxel order is `i + nx * (j + ny * k)`, as in `afni-io`.
 
 pub mod load;
 pub mod synthetic;

@@ -16,10 +16,11 @@ use crate::geom::GridOrient;
 /// in the display name (0 shows the file name alone).
 pub fn load(path: &Path, sess_trail: usize) -> Result<Dataset> {
     let vol = volume::read_any(path).with_context(|| format!("reading {}", path.display()))?;
-    summarize(vol, path, sess_trail)
+    dataset_from_volume(vol, path, sess_trail)
 }
 
-fn summarize(vol: Volume, path: &Path, sess_trail: usize) -> Result<Dataset> {
+/// Adapt a decoded file volume into afniru's display-oriented dataset model.
+fn dataset_from_volume(vol: Volume, path: &Path, sess_trail: usize) -> Result<Dataset> {
     let (ijk_to_ras, ijk_to_ras_real) = grids(&vol)?;
     let voxel_mm = voxel_size(&ijk_to_ras);
     let tr = vol

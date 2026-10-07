@@ -404,6 +404,14 @@ Tasks
 
 ## Log
 
+- 2026-10-06 — Aligned afniru's developer vocabulary with the application-level
+  `afni-core` processing API: `combine_columns`,
+  `Dataset::summarize_time_series`, `summarize_time_series_with`,
+  `transform_time_series`, and `SummaryOutput`. No afniru call sites used the
+  retired core names. Renamed the private loader helper from the misleading
+  `summarize` to `dataset_from_volume`; it adapts file data rather than
+  calculating a scientific summary.
+
 - 2026-10-03 — Added Milestone 3A for an `afni_proc.py`-aware processing and
   provenance rail. The compact rail stays on the right so the existing tool
   controller remains unchanged; gray/blue nodes represent selection while
