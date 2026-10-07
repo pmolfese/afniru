@@ -142,7 +142,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 [[package]]
 name = "afni-core"
 version = "0.1.0"
-source = "git+https://github.com/pmolfese/afni-core?branch=main#77013ad0ae4d5ccda6268f0e8b4f1bb433127d9c"
+source = "git+https://github.com/pmolfese/afni-core?branch=main#98301a8d8792acda2ce04836724d4349f62ad33f"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -150,7 +150,7 @@ dependencies = [
 [[package]]
 name = "afni-io"
 version = "0.1.0"
-source = "git+https://github.com/pmolfese/afni-io?branch=main#6b35bd0341e66b759f6b5887148d0a59fe40f975"
+source = "git+https://github.com/pmolfese/afni-io?branch=main#4f372cc2e33a803e35b55d83baee5a9321825ce8"
 dependencies = [
  "afni-core",
  "flate2",

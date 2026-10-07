@@ -27,6 +27,11 @@ use crate::session::{Action as SessionAction, Cursor, OverlayLayer};
 /// Radius of the gap left in the crosshair around the focus point, in points.
 const GAP: f32 = 7.0;
 
+/// Wheel motion, in egui points, needed to move by one slice. A mouse-wheel
+/// line is normally 40 points; keeping this close to that makes one notch one
+/// slice while giving a trackpad enough resistance to move deliberately.
+const SLICE_SCROLL_POINTS: f32 = 40.0;
+
 /// What the texture on screen was built from; rebuilt when any part changes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct TexKey {
@@ -175,6 +180,8 @@ pub struct PlaneCard {
     /// How far the image is moved from the center when zoomed, as a fraction
     /// of the fitted image's size (so it means the same in any controller).
     pub pan: Vec2,
+    /// Sub-slice wheel motion carried between frames (for smooth trackpads).
+    slice_scroll: f32,
 }
 
 impl PlaneCard {
@@ -184,12 +191,14 @@ impl PlaneCard {
             plane,
             texture: None,
             pan: Vec2::ZERO,
+            slice_scroll: 0.0,
         }
     }
 
     /// Forget the texture (new dataset).
     pub fn reset(&mut self) {
         self.texture = None;
+        self.slice_scroll = 0.0;
     }
 
     /// Draw the card filling `ui`; clicking or dragging on the image moves
@@ -200,8 +209,6 @@ impl PlaneCard {
         let ds = cx.ds;
         let left_is_left = cx.options.left_is_left;
         let map = PlaneMap::new(ds.dims, &ds.orient, self.plane, left_is_left);
-        let index = cur.ijk[map.fixed_axis];
-
         self.header(ui, cx, cur);
         ui.add_space(4.0);
 
@@ -213,6 +220,41 @@ impl PlaneCard {
             cur.active = self.plane;
         }
         response.context_menu(|ui| self.menu(ui, cx, &mut events));
+
+        // Ordinary vertical wheel motion walks through this card's slices.
+        // Ctrl/Cmd-wheel is reserved for zoom below. Accumulating points makes
+        // high-resolution trackpads move at the same measured pace as a wheel.
+        if response.hovered() {
+            let scroll_y = ui.input(|i| {
+                i.events
+                    .iter()
+                    .filter_map(|event| match event {
+                        egui::Event::MouseWheel {
+                            unit,
+                            delta,
+                            modifiers,
+                            ..
+                        } if !modifiers.command => Some(match unit {
+                            egui::MouseWheelUnit::Point => delta.y,
+                            egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => {
+                                delta.y * SLICE_SCROLL_POINTS
+                            }
+                        }),
+                        _ => None,
+                    })
+                    .sum()
+            });
+            if scroll_y != 0.0 {
+                let axis = map.fixed_axis;
+                let old = cur.ijk[axis];
+                cur.ijk[axis] =
+                    scrolled_slice(old, ds.dims[axis], &mut self.slice_scroll, scroll_y);
+                if cur.ijk[axis] != old {
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
+        let index = cur.ijk[map.fixed_axis];
 
         if let Some(s) = slice::extract(
             cx.frame,
@@ -373,8 +415,9 @@ impl PlaneCard {
         if fit <= 0.0 || !fit.is_finite() {
             return;
         }
-        // Zoom and pan: Ctrl+scroll or a pinch zooms around the pointer, scroll
-        // pans a zoomed image, a double-click shows the whole image again.
+        // Zoom and pan: Ctrl+scroll or a pinch zooms around the pointer,
+        // horizontal scroll pans a zoomed image, and a double-click shows the
+        // whole image again. Vertical scroll changes slices in `ui` above.
         let base = mm * fit;
         let to_px = |p: Vec2| vec2(p.x * base.x, p.y * base.y);
         let to_frac = |p: Vec2| vec2(p.x / base.x, p.y / base.y);
@@ -395,8 +438,8 @@ impl PlaneCard {
                     zoom = z1;
                     events.zoom = Some(z1);
                 }
-            } else if zoom > 1.0 && !command && scroll != Vec2::ZERO {
-                pan += to_frac(scroll);
+            } else if zoom > 1.0 && !command && scroll.x != 0.0 {
+                pan.x += to_frac(scroll).x;
             }
         }
         if response.double_clicked() && zoom != 1.0 {
@@ -592,6 +635,28 @@ impl PlaneCard {
 fn pixel_at(p: f32, start: f32, extent: f32, pixels: usize) -> usize {
     let f = ((p - start) / extent * pixels as f32).floor();
     (f.max(0.0) as usize).min(pixels.saturating_sub(1))
+}
+
+/// Apply wheel motion to a slice index. Point-based motion is accumulated so
+/// a trackpad gesture advances at the same pace as discrete wheel lines.
+fn scrolled_slice(index: usize, count: usize, carry: &mut f32, points: f32) -> usize {
+    if count == 0 {
+        *carry = 0.0;
+        return 0;
+    }
+    if *carry != 0.0 && carry.signum() != points.signum() {
+        *carry = 0.0;
+    }
+    *carry += points;
+    let steps = (*carry / SLICE_SCROLL_POINTS).trunc() as isize;
+    *carry -= steps as f32 * SLICE_SCROLL_POINTS;
+    if steps >= 0 {
+        index
+            .saturating_add(steps as usize)
+            .min(count.saturating_sub(1))
+    } else {
+        index.saturating_sub(steps.unsigned_abs())
+    }
 }
 
 /// Header text for the slice: its world position along the fixed axis with a
@@ -800,6 +865,18 @@ mod tests {
         assert_eq!(pixel_at(50.0, 0.0, 100.0, 10), 5);
         assert_eq!(pixel_at(-20.0, 0.0, 100.0, 10), 0);
         assert_eq!(pixel_at(500.0, 0.0, 100.0, 10), 9);
+    }
+
+    #[test]
+    fn wheel_motion_steps_slices_slowly_and_stops_at_the_edges() {
+        let mut carry = 0.0;
+        assert_eq!(scrolled_slice(4, 10, &mut carry, 15.0), 4);
+        assert_eq!(scrolled_slice(4, 10, &mut carry, 25.0), 5);
+        assert_eq!(scrolled_slice(5, 10, &mut carry, -20.0), 5);
+        assert_eq!(scrolled_slice(5, 10, &mut carry, -20.0), 4);
+
+        assert_eq!(scrolled_slice(9, 10, &mut carry, 80.0), 9);
+        assert_eq!(scrolled_slice(0, 10, &mut carry, -80.0), 0);
     }
 
     #[test]
